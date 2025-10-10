@@ -1,0 +1,78 @@
+// === Lexical rules ===
+// Whitespace and comments are skipped automatically by pest.
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* | "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+ident   = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+int     = @{ ASCII_DIGIT+ }
+bool    = { "true" | "false" }
+
+// === Top-level ===
+file    = { SOI ~ item* ~ EOI }
+item    = { import | const_decl | struct_decl | component }
+
+// === Imports and constants ===
+import      = { "import" ~ path ~ ";" }
+const_decl  = { "const" ~ type_ref ~ ident ~ "=" ~ expr ~ ";" }
+
+// === Types ===
+// A type can be an identifier path or an array type.
+type_ref   = { array_ty | path }
+array_ty   = { "[" ~ type_ref ~ ";" ~ expr ~ "]" }
+
+// === Path ===
+// A path may contain multiple segments separated by '::'.
+path       = { ident ~ ( "::" ~ ident )* }
+
+// === Struct declarations ===
+struct_decl = { "Struct" ~ ident ~ "{" ~ field* ~ "}" }
+field       = { ident ~ ":" ~ type_ref ~ "," }
+
+// === Component declarations ===
+component   = { "Component" ~ ident ~ "{" ~ member* ~ "}" }
+member      = _{ computation | constraint }
+
+computation = { "Computation" ~ func_sig ~ block }
+constraint  = { "Constraint"  ~ func_sig ~ block }
+
+// === Function signature ===
+func_sig    = { ident ~ "(" ~ param_list? ~ ")" ~ ( "->" ~ type_ref )? }
+param_list  = { param ~ ( "," ~ param )* }
+param       = { "self" | ident ~ ":" ~ type_ref }
+
+// === Blocks and statements ===
+block     = { "{" ~ stmt* ~ "}" }
+stmt      = _{ var_decl | and_assign | assign | for_loop | assert_stmt | call_stmt | return_stmt }
+
+var_decl  = { type_ref ~ ident ~ "=" ~ expr ~ ";" }
+assign    = { lvalue ~ "="  ~ expr ~ ";" }
+and_assign = { lvalue ~ "&=" ~ expr ~ ";" }
+
+lvalue     = { path ~ ( field_tail | index_tail )* }
+range    = { expr ~ ".." ~ expr }
+for_loop = { "for" ~ ident ~ "in" ~ range ~ block }
+
+assert_stmt = {
+  (
+    "assert_bool" ~ "(" ~ expr ~ (",")? ~ ")"
+  | "assert_eq"   ~ "(" ~ expr ~ "," ~ expr ~ (",")? ~ ")"
+  ) ~ ";"
+}
+
+call_stmt = { call ~ ";" }
+call      = { lvalue ~ call_tail }
+arg_list  = { expr ~ ("," ~ expr)* ~ (",")? }
+
+call_tail  = { "(" ~ (arg_list)? ~ ")" }
+index_tail = { "[" ~ expr ~ "]" }
+field_tail = { "." ~ ident }
+
+return_stmt = { "return" ~ expr ~ ";" }
+
+// === Expressions ===
+// Expressions are defined in a simplified form, real precedence is handled in Rust.
+expr = { postfix ~ ( op ~ postfix )* }
+op   = { "==" | "*" | "+" | "-" | "&" }
+
+postfix  = { primary ~ ( call_tail | index_tail | field_tail )* }
+primary  = { int | bool | path | "(" ~ expr ~ ")" }
