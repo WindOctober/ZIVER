@@ -1,3 +1,5 @@
+pub mod helpers;
+
 #[derive(Debug)]
 pub struct File {
     /// A list of top-level items (imports, constants, structs, components)

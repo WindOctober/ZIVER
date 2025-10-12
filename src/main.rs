@@ -1,47 +1,93 @@
 pub mod ast;
+pub(crate) mod checker;
 pub mod parser;
+pub(crate) mod utils;
 
-use std::env;
+use clap::{ArgAction, Parser};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
+use std::process::exit;
+
+use crate::checker::check_equivalence;
+use crate::utils::dump::dump_parse_result;
+
+/// Command-line interface for the CZ parser.
+#[derive(Parser, Debug)]
+#[command(
+    name = "czc",
+    version,
+    about = "Parse a CZ DSL file and optionally pretty-print its AST."
+)]
+struct Args {
+    /// Path to the input `.cz` file. Defaults to a benchmark file if omitted.
+    #[arg(value_name = "PATH")]
+    input: Option<PathBuf>,
+
+    /// Read the source program from standard input instead of a file.
+    #[arg(long, action = ArgAction::SetTrue)]
+    stdin: bool,
+
+    /// Print the parsed AST to stdout in a pretty format.
+    #[arg(long, action = ArgAction::SetTrue)]
+    ast: bool,
+}
 
 fn main() {
-    // Determine the input path: use CLI arg if provided, otherwise use the default benchmark file.
-    let input_path = env::args()
-        .nth(1)
-        .unwrap_or_else(|| "benchmark/operations/is_zero_word.cz".to_string());
+    let args = Args::parse();
+    let (src, input_path) = parse_source(args.input, args.stdin);
 
-    // Validate that the file exists to provide an early and clear diagnostic.
+    // Parse the file
+    let result = parser::parse_file(&src).map_err(|e| e.to_string());
+    dump_parse_result(&result, &input_path, args.ast);
+
+    if let Ok(file) = &result {
+        if let Err(err) = check_equivalence(file) {
+            eprintln!("✖ Equivalence check failed: {err}");
+            exit(1);
+        } else {
+            println!("✔ Equivalence check passed");
+        }
+    }
+}
+
+/// Reads and returns the source code of a CZ DSL program from the provided input.
+/// Supports both file-based and standard-input modes, with a default fallback path
+/// if no input is specified. Terminates immediately on any unrecoverable I/O error.
+pub fn parse_source(input: Option<PathBuf>, use_stdin: bool) -> (String, Option<PathBuf>) {
+    // Determine source mode.
+    if use_stdin {
+        use std::io::{self, Read};
+        let mut buf = String::new();
+        if let Err(e) = io::stdin().read_to_string(&mut buf) {
+            eprintln!("error: failed to read from stdin: {e}");
+            process::exit(1);
+        }
+        return (buf, None);
+    }
+
+    // Resolve path or fallback to default benchmark file.
+    let input_path = match input {
+        Some(p) => p,
+        None => PathBuf::from("benchmark/operations/is_zero_word.cz"),
+    };
+
     if !Path::new(&input_path).exists() {
         eprintln!(
             "error: input file not found: {}\n\
-             hint: run `cargo run -- <path/to/file.cz>` or place the file at the default path.",
-            input_path
+             hint: run `czc <path/to/file.cz>` or place the file at the default path.",
+            input_path.display()
         );
         process::exit(1);
     }
 
-    // Read the entire source into memory. This is sufficient for a benchmark-scale DSL file.
     let src = match fs::read_to_string(&input_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("error: failed to read '{}': {e}", input_path);
+            eprintln!("error: failed to read '{}': {e}", input_path.display());
             process::exit(1);
         }
     };
 
-    // Parse the file via our pest-based frontend.
-    match parser::parse_file(&src) {
-        Ok(file) => {
-            // Pretty-print the AST to stdout for inspection.
-            println!("=== Parsed AST (source: {input_path}) ===");
-            println!("{:#?}", file);
-        }
-        Err(e) => {
-            // Report a structured error message and exit with failure.
-            eprintln!("error: parse failed for '{}':\n{e}", input_path);
-            process::exit(1);
-        }
-    }
+    (src, Some(input_path))
 }
