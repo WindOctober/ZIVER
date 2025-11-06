@@ -10,10 +10,11 @@ use std::process;
 use std::process::exit;
 
 use crate::checker::check_equivalence;
+use crate::utils::derive_config;
 use crate::utils::dump::dump_parse_result;
 
 /// Command-line interface for the CZ parser.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "czc",
     version,
@@ -31,10 +32,18 @@ struct Args {
     /// Print the parsed AST to stdout in a pretty format.
     #[arg(long, action = ArgAction::SetTrue)]
     ast: bool,
+
+    /// Enables the optimization of *type-based modular arithmetic simplification* (enabled by default).
+    /// Use `--no-type-opt` to disable this optimization, which is useful for conducting ablation studies.
+    #[arg(long = "no-type-opt", alias = "disable-type-opt",
+          action = ArgAction::SetFalse, default_value_t = true)]
+    type_opt: bool,
 }
 
 fn main() {
     let args = Args::parse();
+    let config = derive_config(args.clone());
+
     let (src, input_path) = parse_source(args.input, args.stdin);
 
     // Parse the file
@@ -42,7 +51,7 @@ fn main() {
     dump_parse_result(&result, &input_path, args.ast);
 
     if let Ok(file) = &result {
-        if let Err(err) = check_equivalence(file) {
+        if let Err(err) = check_equivalence(file, config) {
             eprintln!("✖ Equivalence check failed: {err}");
             exit(1);
         } else {
@@ -75,7 +84,7 @@ pub fn parse_source(input: Option<PathBuf>, use_stdin: bool) -> (String, Option<
     if !Path::new(&input_path).exists() {
         eprintln!(
             "error: input file not found: {}\n\
-             hint: run `czc <path/to/file.cz>` or place the file at the default path.",
+             hint: run `path/to/czc <path/to/file.cz>` or place the file at the default path.",
             input_path.display()
         );
         process::exit(1);

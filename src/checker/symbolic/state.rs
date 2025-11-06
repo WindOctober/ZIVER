@@ -1,24 +1,32 @@
-use crate::checker::symbolic::expr::{BoolExpr, SymExpr};
+use std::rc::Rc;
+
+use crate::checker::symbolic::{
+    context::Context,
+    expr::{BoolExpr, SymExpr},
+};
 use im::{HashMap, Vector};
 
 /// Path-local symbolic state with a persistent store and path conditions.
 /// All updates are functional (return a new state) to exploit structural sharing.
 #[derive(Clone, Debug)]
-pub struct SymbolicState {
-    /// Persistent mapping from abstract addresses to symbolic expressions.
+pub struct SymState {
+    /// mapping from abstract addresses to symbolic expressions.
     /// Key is (var_id, offset), see the design notes in the previous snippet.
     store: HashMap<(usize, usize), SymExpr>,
 
-    /// Persistent sequence of path conditions (conjoined at the path level).
+    /// sequence of path conditions (conjoined at the path level).
     path_cond: Vector<BoolExpr>,
+
+    ctx: Rc<Context>,
 }
 
-impl SymbolicState {
+impl SymState {
     /// Creates an empty symbolic state.
-    pub fn new() -> Self {
+    pub fn new(ctx: Rc<Context>) -> Self {
         Self {
             store: HashMap::new(),
             path_cond: Vector::new(),
+            ctx,
         }
     }
 
@@ -42,7 +50,7 @@ impl SymbolicState {
 
     /// Returns a new state with (var_id, offset) bound to `value` (overwriting if present).
     pub fn with_write(&self, var_id: usize, offset: usize, value: SymExpr) -> Self {
-        let mut next: SymbolicState = self.clone();
+        let mut next: SymState = self.clone();
         next.store = next.store.update((var_id, offset), value);
         next
     }

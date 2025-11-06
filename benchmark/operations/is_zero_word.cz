@@ -5,10 +5,10 @@ const usize WORD_SIZE = 4;
 // inherit: type Word = [F; WORD_SIZE];
 
 Struct IsZeroWordOperation{
-    is_zero_byte: [IsZeroOperation; WORD_SIZE],
-    is_lower_half_zero: F,
-    is_upper_half_zero: F,
-    result: F,
+    input is_zero_byte: [IsZeroOperation; WORD_SIZE],
+    input is_lower_half_zero: F,
+    input is_upper_half_zero: F,
+    output result: F,
 }
 
 Component IsZeroWordOperation{

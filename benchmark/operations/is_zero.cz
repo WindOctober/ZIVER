@@ -1,4 +1,4 @@
 struct IsZeroOperation{
-    inverse: F,
-    result: F,
+    input inverse: F,
+    output result: F,
 }
