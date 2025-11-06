@@ -55,23 +55,62 @@ fn parse_const(p: Pair<Rule>) -> Result<Item> {
     Ok(Item::Const { ty, name, value })
 }
 
-/// `Struct Name { field: Type, ... }`
+/// `Struct Name { field* }`
 fn parse_struct(p: Pair<Rule>) -> Result<Item> {
     let mut it = p.into_inner();
     let name = it.next().unwrap().as_str().to_string();
     let mut fields = Vec::new();
     for f in it {
         if f.as_rule() == Rule::field {
-            let mut fi = f.into_inner();
-            let fname = fi.next().unwrap().as_str().to_string();
-            let fty = parse_type(fi.next().unwrap())?;
-            fields.push(Field {
-                name: fname,
-                ty: fty,
-            });
+            fields.push(parse_field(f)?);
         }
     }
     Ok(Item::Struct { name, fields })
+}
+
+/// field := io_prefix? ident ":" type_ref ","
+fn parse_field(p: Pair<Rule>) -> Result<Field> {
+    let mut it = p.into_inner();
+
+    // First token: maybe io_prefix, else ident
+    let first = it.next().ok_or_else(|| anyhow!("empty field"))?;
+
+    let (io, name_pair) = match first.as_rule() {
+        Rule::io_prefix => {
+            let io = parse_io_prefix(first)?;
+            let name_pair = it.next().ok_or_else(|| anyhow!("missing ident"))?;
+            (io, name_pair)
+        }
+        Rule::ident => (IOType::Input, first), // default to Input
+        other => return Err(anyhow!("unexpected token in field: {:?}", other)),
+    };
+
+    if name_pair.as_rule() != Rule::ident {
+        return Err(anyhow!("field name must be ident"));
+    }
+    let fname = name_pair.as_str().to_string();
+
+    // Next must be type_ref
+    let ty_pair = it.next().ok_or_else(|| anyhow!("missing type_ref"))?;
+    if ty_pair.as_rule() != Rule::type_ref {
+        return Err(anyhow!("expected type_ref after ident"));
+    }
+    let fty = parse_type(ty_pair)?;
+
+    Ok(Field {
+        io,
+        name: fname,
+        ty: fty,
+    })
+}
+
+/// io_prefix -> IOType
+fn parse_io_prefix(p: Pair<Rule>) -> Result<IOType> {
+    match p.as_str() {
+        "input" | "Input" => Ok(IOType::Input),
+        "output" | "Output" => Ok(IOType::Output),
+        _ => Err(anyhow!("unknown io_prefix")),
+    }
 }
 
 /// `Component Name { member* }`

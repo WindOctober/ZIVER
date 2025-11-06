@@ -19,7 +19,14 @@ pub enum Item {
 }
 
 #[derive(Debug)]
+pub enum IOType {
+    Input,
+    Output,
+}
+
+#[derive(Debug)]
 pub struct Field {
+    pub io: IOType,
     /// Name and type of the field
     pub name: String,
     pub ty: Type,

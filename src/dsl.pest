@@ -26,7 +26,8 @@ path       = { ident ~ ( "::" ~ ident )* }
 
 // === Struct declarations ===
 struct_decl = { "Struct" ~ ident ~ "{" ~ field* ~ "}" }
-field       = { ident ~ ":" ~ type_ref ~ "," }
+io_prefix   = { "input" | "output" }
+field       = { io_prefix? ~ ident ~ ":" ~ type_ref ~ "," }
 
 // === Component declarations ===
 component   = { "Component" ~ ident ~ "{" ~ member* ~ "}" }
