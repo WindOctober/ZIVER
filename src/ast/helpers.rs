@@ -1,10 +1,11 @@
 use super::*;
 
-/// Returns an iterator over all `Component` declarations in the file.
 impl File {
-    pub fn components(&self) -> impl Iterator<Item = (&String, &Vec<Member>)> {
+    /// Iterate all `Component`s with their (optional) IDs.
+    /// Returns `(id, &name, &members)`.
+    pub fn components(&self) -> impl Iterator<Item = (Option<i64>, &String, &Vec<Member>)> {
         self.items.iter().filter_map(|item| match item {
-            Item::Component { name, members } => Some((name, members)),
+            Item::Component { id, name, members } => Some((*id, name, members)),
             _ => None,
         })
     }

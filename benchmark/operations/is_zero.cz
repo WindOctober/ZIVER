@@ -1,4 +1,4 @@
-struct IsZeroOperation{
+Struct IsZeroOperation{
     input inverse: F,
     output result: F,
 }

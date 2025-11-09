@@ -43,7 +43,7 @@ fn parse_item(p: Pair<Rule>) -> Result<Item> {
 fn parse_import(p: Pair<Rule>) -> Result<Item> {
     let mut it = p.into_inner();
     let path = parse_path(it.next().unwrap());
-    Ok(Item::Import { path })
+    Ok(Item::Import { id: None, path })
 }
 
 /// `const <type> <name> = <expr>;`
@@ -52,7 +52,12 @@ fn parse_const(p: Pair<Rule>) -> Result<Item> {
     let ty = parse_type(it.next().unwrap())?;
     let name = it.next().unwrap().as_str().to_string();
     let value = parse_expr(it.next().unwrap())?;
-    Ok(Item::Const { ty, name, value })
+    Ok(Item::Const {
+        id: None,
+        ty,
+        name,
+        value,
+    })
 }
 
 /// `Struct Name { field* }`
@@ -65,7 +70,11 @@ fn parse_struct(p: Pair<Rule>) -> Result<Item> {
             fields.push(parse_field(f)?);
         }
     }
-    Ok(Item::Struct { name, fields })
+    Ok(Item::Struct {
+        id: None,
+        name,
+        fields,
+    })
 }
 
 /// field := io_prefix? ident ":" type_ref ","
@@ -98,6 +107,7 @@ fn parse_field(p: Pair<Rule>) -> Result<Field> {
     let fty = parse_type(ty_pair)?;
 
     Ok(Field {
+        id: None,
         io,
         name: fname,
         ty: fty,
@@ -125,7 +135,11 @@ fn parse_component(p: Pair<Rule>) -> Result<Item> {
             _ => unreachable!("unexpected component member"),
         });
     }
-    Ok(Item::Component { name, members })
+    Ok(Item::Component {
+        id: None,
+        name,
+        members,
+    })
 }
 
 /// Parse a function-like member: signature + block.
@@ -166,6 +180,7 @@ fn parse_func(mut it: Pairs<Rule>) -> Result<Func> {
     let body = parse_block(body_pair)?;
 
     Ok(Func {
+        id: None,
         name,
         params,
         ret: ret_ty,
@@ -186,7 +201,7 @@ fn parse_param(p: Pair<Rule>) -> Result<Param> {
                 let name = first.as_str();
                 if name == "self" {
                     // Case B: grammar reduced `self` as an identifier (edge but possible in some grammars)
-                    return Ok(Param::SelfParam);
+                    return Ok(Param::SelfParam { id: None });
                 }
                 // Case C: regular `ident : type_ref`
                 let ty_pair = it
@@ -194,6 +209,7 @@ fn parse_param(p: Pair<Rule>) -> Result<Param> {
                     .ok_or_else(|| anyhow!("missing type after parameter '{}'", name))?;
                 let ty = parse_type(ty_pair)?;
                 Ok(Param::Typed {
+                    id: None,
                     name: name.to_string(),
                     ty,
                 })
@@ -206,7 +222,7 @@ fn parse_param(p: Pair<Rule>) -> Result<Param> {
     } else {
         // No children: accept as literal `self`
         if p.as_str() == "self" {
-            Ok(Param::SelfParam)
+            Ok(Param::SelfParam { id: None })
         } else {
             Err(anyhow!(
                 "invalid parameter: expected `self` or `ident : type`"
@@ -226,7 +242,12 @@ fn parse_block(p: Pair<Rule>) -> Result<Vec<Stmt>> {
                 let ty = parse_type(it.next().unwrap())?;
                 let name = it.next().unwrap().as_str().to_string();
                 let init = parse_expr(it.next().unwrap())?;
-                Stmt::VarDecl { ty, name, init }
+                Stmt::VarDecl {
+                    id: None,
+                    ty,
+                    name,
+                    init,
+                }
             }
             Rule::assign => {
                 // assign := lvalue "=" expr ";"
@@ -261,6 +282,7 @@ fn parse_block(p: Pair<Rule>) -> Result<Vec<Stmt>> {
                 };
                 let body = parse_block(it.next().unwrap())?;
                 Stmt::For {
+                    id: None,
                     var,
                     start,
                     end,
@@ -347,7 +369,10 @@ fn parse_type(p: Pair<Rule>) -> Result<Type> {
             let size = parse_expr(it.next().unwrap())?;
             Type::Array(Box::new(inner), size)
         }
-        Rule::path => Type::Path(parse_path(p)),
+        Rule::path => Type::Path {
+            segments: parse_path(p),
+            ref_id: None,
+        },
         _ => unreachable!("unexpected type rule"),
     })
 }
@@ -376,7 +401,10 @@ fn parse_lvalue(p: Pair<Rule>) -> Result<LValue> {
                     .into_inner()
                     .next()
                     .ok_or_else(|| anyhow!("field_tail missing ident"))?;
-                tails.push(LvTail::Field(seg.as_str().to_string()));
+                tails.push(LvTail::Field {
+                    name: seg.as_str().to_string(),
+                    ref_id: None,
+                });
             }
             Rule::index_tail => {
                 // index_tail := "[" ~ expr ~ "]"
@@ -397,7 +425,11 @@ fn parse_lvalue(p: Pair<Rule>) -> Result<LValue> {
         }
     }
 
-    Ok(LValue { head, tails })
+    Ok(LValue {
+        ref_id: None,
+        head,
+        tails,
+    })
 }
 
 /// Parse an expression in the simplified left-associative form:
@@ -457,7 +489,10 @@ fn parse_primary(p: Pair<Rule>) -> Result<Expr> {
     Ok(match inner.as_rule() {
         Rule::int => Expr::Int(inner.as_str().parse()?),
         Rule::bool => Expr::Bool(inner.as_str() == "true"),
-        Rule::path => Expr::Path(parse_path(inner)),
+        Rule::path => Expr::Path {
+            segments: parse_path(inner),
+            ref_id: None,
+        },
         Rule::expr => Expr::Paren(Box::new(parse_expr(inner)?)),
         _ => unreachable!("unexpected primary"),
     })
@@ -502,7 +537,11 @@ fn parse_postfix(p: Pair<Rule>) -> Result<Expr> {
                     .into_inner()
                     .next()
                     .ok_or_else(|| anyhow!("field_tail missing ident"))?;
-                e = Expr::Field(Box::new(e), name.as_str().to_string());
+                e = Expr::Field {
+                    base: Box::new(e),
+                    name: name.as_str().to_string(),
+                    ref_id: None,
+                };
             }
             other => {
                 return Err(anyhow!(

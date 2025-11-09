@@ -1,6 +1,6 @@
 use crate::Args;
 
-pub mod dump;
+pub mod module_resolver;
 
 pub struct SetConfig {
     pub type_refine: bool,

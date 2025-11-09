@@ -186,10 +186,10 @@ impl SymbolicExecutor for Expr {
                 out.push_back((SymExpr::Int(k as i128), state));
                 out
             }
-            Expr::Path(segs) => {
+            Expr::Path { segments, .. } => {
                 // Minimal name-to-symbol mapping: treat a path as a symbolic variable.
                 // If you need an environment with SSA or address-based loads, plug it here.
-                let name = segs.join("::");
+                let name = segments.join("::");
                 let mut out = Vector::new();
                 out.push_back((SymExpr::Var(name), state));
                 out
@@ -258,7 +258,7 @@ impl SymbolicExecutor for Expr {
                     "BitAnd requires a precise semantics choice (bitwise vs. logical) before mapping to SymExpr."
                 );
             }
-            Expr::Call(_, _) | Expr::Index(_, _) | Expr::Field(_, _) => {
+            Expr::Call(_, _) | Expr::Index(_, _) | Expr::Field { .. } => {
                 unimplemented!(
                     "Call/Index/Field require an environment and memory model to interpret."
                 );
