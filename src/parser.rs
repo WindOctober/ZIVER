@@ -128,17 +128,31 @@ fn parse_component(p: Pair<Rule>) -> Result<Item> {
     let mut it = p.into_inner();
     let name = it.next().unwrap().as_str().to_string();
     let mut members = Vec::new();
+    let mut query: Option<Query> = None;
+
     for m in it {
-        members.push(match m.as_rule() {
-            Rule::computation => Member::Computation(parse_func(m.into_inner())?),
-            Rule::constraint => Member::Constraint(parse_func(m.into_inner())?),
+        match m.as_rule() {
+            Rule::computation => {
+                members.push(Member::Computation(parse_func(m.into_inner())?));
+            }
+            Rule::constraint => {
+                members.push(Member::Constraint(parse_func(m.into_inner())?));
+            }
+            Rule::query_stmt => {
+                if query.is_some() {
+                    return Err(anyhow!("duplicate Query clause in component `{}`", name));
+                }
+                query = Some(parse_query_stmt(m)?);
+            }
             _ => unreachable!("unexpected component member"),
-        });
+        }
     }
+
     Ok(Item::Component {
         id: None,
         name,
         members,
+        query,
     })
 }
 
@@ -186,6 +200,26 @@ fn parse_func(mut it: Pairs<Rule>) -> Result<Func> {
         ret: ret_ty,
         body,
     })
+}
+
+/// query_stmt := ^"Query" "(" query_side ";" query_side ")"
+fn parse_query_stmt(p: Pair<Rule>) -> Result<Query> {
+    let mut it = p.into_inner();
+    let lhs = parse_query_side(it.next().ok_or_else(|| anyhow!("missing LHS in Query"))?)?;
+    let rhs = parse_query_side(it.next().ok_or_else(|| anyhow!("missing RHS in Query"))?)?;
+    Ok(Query { lhs, rhs })
+}
+
+/// query_side := path ("," path)* (",")?
+fn parse_query_side(p: Pair<Rule>) -> Result<Vec<Vec<String>>> {
+    let mut out = Vec::new();
+    for n in p.into_inner() {
+        match n.as_rule() {
+            Rule::path => out.push(parse_path(n)),
+            _ => return Err(anyhow!("unexpected rule in query_side: {:?}", n.as_rule())),
+        }
+    }
+    Ok(out)
 }
 
 /// Parse a single parameter: either `self` (literal) or `ident : type`.

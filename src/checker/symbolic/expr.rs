@@ -1,12 +1,24 @@
 use std::fmt::{Display, Formatter};
 use std::ops::{Add, Div, Mul, Sub};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SymType {
+    /// Finite field element (generic field `F`).
+    F,
+    /// Unsigned integer with a fixed bit width.
+    Uint(usize),
+    /// Signed integer with a fixed bit width.
+    Int(usize),
+    /// Boolean value.
+    Bool,
+}
+
 /// Integer-valued symbolic expressions for SMT-LIB NIA.
 /// The design preserves structure (no evaluation), enabling constraint emission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SymExpr {
     Int(i128),
-    Var(String),
+    Var(String, SymType),
     Neg(Box<SymExpr>),
     Add(Vec<SymExpr>), // n-ary addition
     Mul(Vec<SymExpr>), // n-ary multiplication
@@ -163,16 +175,6 @@ impl From<i128> for SymExpr {
         SymExpr::Int(v)
     }
 }
-impl From<&str> for SymExpr {
-    fn from(s: &str) -> Self {
-        SymExpr::Var(s.to_string())
-    }
-}
-impl From<String> for SymExpr {
-    fn from(s: String) -> Self {
-        SymExpr::Var(s)
-    }
-}
 
 /* ---------- Operator overloads (builder-style; no evaluation) ---------- */
 
@@ -267,11 +269,22 @@ impl BoolExpr {
 
 /* ---------- SMT-LIB format transform (minimal) ---------- */
 
+impl Display for SymType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SymType::F => write!(f, "F"),                 // field element
+            SymType::Uint(w) => write!(f, "uint({})", w), // unsigned int with width
+            SymType::Int(w) => write!(f, "int({})", w),   // signed int with width
+            SymType::Bool => write!(f, "bool"),           // boolean
+        }
+    }
+}
+
 impl Display for SymExpr {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             SymExpr::Int(k) => write!(f, "{k}"),
-            SymExpr::Var(s) => write!(f, "{s}"),
+            SymExpr::Var(s, ty) => write!(f, "{s} : {ty}"),
             SymExpr::Neg(x) => write!(f, "(- {})", x),
             SymExpr::Add(xs) => {
                 if xs.is_empty() {

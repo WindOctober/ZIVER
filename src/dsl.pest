@@ -30,8 +30,16 @@ io_prefix   = { "input" | "output" }
 field       = { io_prefix? ~ ident ~ ":" ~ type_ref ~ "," }
 
 // === Component declarations ===
-component   = { "Component" ~ ident ~ "{" ~ member* ~ "}" }
+component   = { "Component" ~ ident ~ "{" ~ member* ~ query_stmt? ~ "}"}
 member      = _{ computation | constraint }
+
+// === Query clause (case-insensitive) ===
+// Syntax: Query(xxx,aa,bb; yyy,aa,bb)
+// Both sides are lists of `path` with optional trailing comma.
+// Cardinality equality is enforced later (semantic check).
+query_stmt  = { ^"Query" ~ "(" ~ query_side ~ ";" ~ query_side ~ ")" }
+query_side  = { path ~ ( "," ~ path )* ~ ( "," )? }
+
 
 computation = { "Computation" ~ func_sig ~ block }
 constraint  = { "Constraint"  ~ func_sig ~ block }

@@ -153,8 +153,6 @@ impl SymbolicExecutor for Func {
     }
 }
 
-/* ---------------- Stmt ---------------- */
-
 impl SymbolicExecutor for Stmt {
     fn execute(self, state: SymState) -> Vector<(SymExpr, SymState)> {
         // For statements, we define the following minimal contract:
@@ -172,8 +170,6 @@ impl SymbolicExecutor for Stmt {
         }
     }
 }
-
-/* ---------------- Expr ---------------- */
 
 impl SymbolicExecutor for Expr {
     fn execute(self, state: SymState) -> Vector<(SymExpr, SymState)> {

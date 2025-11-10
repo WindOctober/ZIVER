@@ -8,23 +8,95 @@ pub enum MemberIndex {
     Method { func_id: i64 },
 }
 
+impl MemberIndex {
+    /// Returns field id if this member is a field.
+    pub fn as_field_id(&self) -> Option<i64> {
+        match self {
+            MemberIndex::Field { field_id } => Some(*field_id),
+            _ => None,
+        }
+    }
+    /// Returns function id if this member is a method.
+    pub fn as_func_id(&self) -> Option<i64> {
+        match self {
+            MemberIndex::Method { func_id } => Some(*func_id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathKind {
+    Builtin,     // primitive scalar type
+    Struct(i64), // struct type by name lookup
+}
+
 /// Minimal typing info used by symbolic execution and light inference.
 #[derive(Clone, Debug, Default)]
-pub struct TypeCtx {
-    pub var_types: HashMap<i64, Type>,   // var_id -> declared type
-    pub const_types: HashMap<i64, Type>, // const_id -> type
-    pub field_types: HashMap<i64, Type>, // field_id -> type
-    pub fn_sigs: HashMap<i64, (Vec<Type>, Option<Type>)>, // func_id -> (params, ret?)
+struct TypeCtx {
+    var_types: HashMap<i64, Type>,   // var_id -> declared type
+    const_types: HashMap<i64, Type>, // const_id -> type
+    field_types: HashMap<i64, Type>, // field_id -> type
+    fn_sigs: HashMap<i64, (Vec<Type>, Option<Type>)>, // func_id -> (params, ret?)
 }
 
 /// Global initialization context (flat namespace).
 #[derive(Clone, Debug, Default)]
 pub struct Context {
-    pub next_sym_id: usize,
-    pub funcs: HashMap<i64, Func>, // func_id -> Func
-    pub struct_fields: HashMap<i64, HashMap<String, MemberIndex>>, // struct_id -> { name -> member }
-    pub types: TypeCtx,
+    next_sym_id: usize,
+    funcs: HashMap<i64, Func>, // func_id -> Func
+    struct_fields: HashMap<i64, HashMap<String, MemberIndex>>, // struct_id -> { name -> member }
+    types: TypeCtx,
     struct_index: HashMap<String, i64>, // struct name -> struct_id
+}
+
+impl Context {
+    /// Returns the member map of a struct if available.
+    pub fn struct_members(&self, struct_id: i64) -> Option<&HashMap<String, MemberIndex>> {
+        self.struct_fields.get(&struct_id)
+    }
+
+    /// Query the static type of a non-function id.
+    /// Looks up var, const, or field types only.
+    pub fn query_type(&self, id: i64) -> Option<&Type> {
+        self.types
+            .var_types
+            .get(&id)
+            .or_else(|| self.types.const_types.get(&id))
+            .or_else(|| self.types.field_types.get(&id))
+    }
+
+    /// Strictly classify a `Type::Path` using `struct_index` by terminal name.
+    /// Precondition: `ty` must be `Type::Path`; otherwise this function panics.
+    pub fn classify_type(&self, ty: &Type) -> Result<PathKind, String> {
+        // Precondition check: accept only Path, reject others immediately.
+        let Type::Path { segments, .. } = ty else {
+            unreachable!("classify_path_by_name_strict: expected Type::Path, got non-Path");
+        };
+
+        #[inline]
+        fn is_builtin(name: &str) -> bool {
+            // Extend to your DSL's primitive set as needed.
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "bool" | "field" | "u8" | "u16" | "u32" | "u64" | "u128" | "i32" | "i64"
+            )
+        }
+
+        let last = segments
+            .last()
+            .ok_or_else(|| "empty type path".to_string())?
+            .as_str();
+
+        // Name-first policy: struct names take precedence.
+        if let Some(&sid) = self.struct_index.get(last) {
+            return Ok(PathKind::Struct(sid));
+        }
+        if is_builtin(last) {
+            return Ok(PathKind::Builtin);
+        }
+        Err(format!("unknown type path by name: {}", last))
+    }
 }
 
 /// Single global symbol table + stack of local frames.

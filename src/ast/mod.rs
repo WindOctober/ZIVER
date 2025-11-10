@@ -34,6 +34,7 @@ pub enum Item {
         id: Option<i64>,
         name: String,
         members: Vec<Member>,
+        query: Option<Query>,
     },
 }
 
@@ -80,6 +81,12 @@ pub enum Param {
         name: String,
         ty: Type,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct Query {
+    pub lhs: Vec<Vec<String>>, // list of paths
+    pub rhs: Vec<Vec<String>>, // list of paths
 }
 
 #[derive(Debug, Clone)]

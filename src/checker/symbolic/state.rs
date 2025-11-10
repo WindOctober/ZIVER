@@ -1,100 +1,227 @@
+use im::HashMap as IMap;
 use std::rc::Rc;
 
-use crate::checker::symbolic::{
-    context::Context,
-    expr::{BoolExpr, SymExpr},
-};
-use im::{HashMap, Vector};
+use crate::ast::*;
+use crate::checker::symbolic::context::{Context, PathKind};
+use crate::checker::symbolic::eval_len_const_or_err;
+use crate::checker::symbolic::expr::{BoolExpr, SymExpr, SymType};
 
-/// Path-local symbolic state with a persistent store and path conditions.
-/// All updates are functional (return a new state) to exploit structural sharing.
+/// Persistent store node for symbolic memory.
+#[derive(Clone, Debug)]
+pub enum StoreNode {
+    /// Scalar expression.
+    Scalar(SymExpr),
+
+    /// Constant-size (or unknown-size) array.
+    /// Indices must be concrete `usize`; symbolic indices are disallowed.
+    Array {
+        len: Option<usize>,
+        elems: IMap<usize, StoreNode>,
+    },
+
+    /// Struct keyed by field id.
+    Struct { fields: IMap<i64, StoreNode> },
+}
+
+impl StoreNode {
+    fn scalar(e: SymExpr) -> Self {
+        StoreNode::Scalar(e)
+    }
+    fn array(len: Option<usize>) -> Self {
+        StoreNode::Array {
+            len,
+            elems: IMap::new(),
+        }
+    }
+    fn structure() -> Self {
+        StoreNode::Struct {
+            fields: IMap::new(),
+        }
+    }
+}
+
+/// Persistent store mapping variable ids to nodes.
+#[derive(Clone, Debug, Default)]
+pub struct Store {
+    /// var/param/loop-var binding id -> node
+    pub vars: IMap<i64, StoreNode>,
+}
+
+impl Store {
+    pub fn get(&self, id: i64) -> Option<&StoreNode> {
+        self.vars.get(&id)
+    }
+    pub fn set(self, id: i64, node: StoreNode) -> Self {
+        Store {
+            vars: self.vars.update(id, node),
+        }
+    }
+}
+
+/// Symbolic state with path condition and persistent store.
 #[derive(Clone, Debug)]
 pub struct SymState {
-    /// mapping from abstract addresses to symbolic expressions.
-    /// Key is (var_id, offset), see the design notes in the previous snippet.
-    store: HashMap<(usize, usize), SymExpr>,
-
-    /// sequence of path conditions (conjoined at the path level).
-    path_cond: Vector<BoolExpr>,
-
-    ctx: Rc<Context>,
+    pub ctx: Rc<Context>,
+    pub path_cond: BoolExpr,
+    pub store: Store,
+    fresh: usize,
 }
 
 impl SymState {
-    /// Creates an empty symbolic state.
     pub fn new(ctx: Rc<Context>) -> Self {
         Self {
-            store: HashMap::new(),
-            path_cond: Vector::new(),
             ctx,
+            path_cond: BoolExpr::Bool(true),
+            store: Store::default(),
+            fresh: 0,
         }
     }
 
-    /// Returns the persistent vector of path conditions (read-only view).
-    pub fn path_condition(&self) -> &Vector<BoolExpr> {
-        &self.path_cond
+    /// Map an AST type to a symbolic sort for variable creation.
+    /// Only builtin scalars are mappable; structs/arrays/functions are not.
+    fn type_map(&self, ty: &Type) -> Result<SymType, String> {
+        match self.ctx.classify_type(ty) {
+            Ok(PathKind::Builtin) => {
+                // Parse terminal name: "bool" | "field" | "uN" | "iN".
+                let Type::Path { segments, .. } = ty else {
+                    unreachable!("classify_type returned Builtin for non-Path");
+                };
+                let last = segments
+                    .last()
+                    .expect("non-empty path")
+                    .to_ascii_lowercase();
+                if last == "bool" {
+                    return Ok(SymType::Bool);
+                }
+                if last == "field" || last == "f" {
+                    return Ok(SymType::F);
+                }
+                if let Some(bits) = last.strip_prefix('u') {
+                    let w = bits
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid uint width in type name: {}", last))?;
+                    return Ok(SymType::Uint(w));
+                }
+                if let Some(bits) = last.strip_prefix('i') {
+                    let w = bits
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid int width in type name: {}", last))?;
+                    return Ok(SymType::Int(w));
+                }
+                Err(format!("unknown builtin type name: {}", last))
+            }
+            Ok(PathKind::Struct(_sid)) => {
+                // Composite types do not map to a scalar sort.
+                Err("cannot map struct type to SymType".to_string())
+            }
+            Err(e) => Err(e),
+        }
     }
 
-    /// Returns a new state with `cond` appended to the path condition.
-    pub fn with_pc(&self, cond: BoolExpr) -> Self {
-        // Persistent vector updates in-place on the cloned state.
-        let mut next = self.clone();
-        next.path_cond.push_back(cond);
-        next
+    fn fresh_sym(&mut self, hint: &str, ty: SymType) -> SymExpr {
+        let id = self.fresh;
+        self.fresh += 1;
+        SymExpr::Var(format!("{}_{}", hint, id), ty)
     }
 
-    /// Reads the binding at address (var_id, offset), if present.
-    pub fn read(&self, var_id: usize, offset: usize) -> Option<&SymExpr> {
-        self.store.get(&(var_id, offset))
+    /// Initializes parameters with fresh symbols.
+    /// For `self`, when a struct id is given, materializes its fields as fresh scalars.
+    pub fn init_params_for_func(&mut self, func: &Func, self_struct_id: Option<i64>) {
+        for p in &func.params {
+            match p {
+                Param::SelfParam { id } => {
+                    if let Some(vid) = *id {
+                        let node = if let Some(sid) = self_struct_id {
+                            // Recursively materialize fields with correct static types.
+                            self.materialize_struct_node(sid, "self")
+                        } else {
+                            // Unknown `self` shape; keep an empty struct placeholder.
+                            StoreNode::structure()
+                        };
+                        self.store = self.store.clone().set(vid, node);
+                    }
+                }
+                Param::Typed { id, name, ty } => {
+                    if let Some(vid) = *id {
+                        let node = self.alloc_node_for_type(name, ty);
+                        self.store = self.store.clone().set(vid, node);
+                    }
+                }
+            }
+        }
     }
 
-    /// Returns a new state with (var_id, offset) bound to `value` (overwriting if present).
-    pub fn with_write(&self, var_id: usize, offset: usize, value: SymExpr) -> Self {
-        let mut next: SymState = self.clone();
-        next.store = next.store.update((var_id, offset), value);
-        next
+    /// Materialize a struct into a persistent node with recursively-typed fields.
+    /// Each field node is allocated according to its declared static type.
+    fn materialize_struct_node(&mut self, struct_id: i64, prefix: &str) -> StoreNode {
+        // Snapshot (field_id, name, type) to avoid conflicting borrows during recursive allocation.
+        let pairs: Vec<(i64, String, Type)> = {
+            let mut out = Vec::new();
+            if let Some(members) = self.ctx.struct_members(struct_id) {
+                for (name, mi) in members {
+                    if let Some(fid) = mi.as_field_id() {
+                        let fty = self
+                            .ctx
+                            .query_type(fid)
+                            .unwrap_or_else(|| panic!("missing static type for field_id {}", fid))
+                            .clone();
+                        out.push((fid, name.clone(), fty));
+                    }
+                }
+            }
+            out
+        };
+
+        // Allocate children recursively using the snapshot.
+        let mut node = StoreNode::structure();
+        if let StoreNode::Struct { fields } = &mut node {
+            let mut acc = fields.clone(); // persistent map semantics
+            for (fid, name, fty) in pairs {
+                let child = self.alloc_node_for_type(&format!("{prefix}_{name}"), &fty);
+                acc.insert(fid, child);
+            }
+            *fields = acc;
+        }
+        node
     }
 
-    /// Returns a new state without the binding at (var_id, offset) and whether it existed.
-    pub fn without(&self, var_id: usize, offset: usize) -> (Self, bool) {
-        let existed = self.store.contains_key(&(var_id, offset));
-        // `without` returns a new map with the key removed.
-        let mut next = self.clone();
-        next.store = self.store.without(&(var_id, offset));
-        (next, existed)
-    }
+    /// Allocates a default node according to the declared type (recursive over struct fields).
+    fn alloc_node_for_type(&mut self, hint: &str, ty: &Type) -> StoreNode {
+        match ty {
+            // Strict name-based classification (struct_index only).
+            Type::Path { .. } => {
+                match self.ctx.classify_type(ty) {
+                    Ok(PathKind::Builtin) => {
+                        // Builtins are modeled as scalars with precise sorts.
+                        let sty = self
+                            .type_map(ty)
+                            .unwrap_or_else(|e| panic!("builtin type mapping failed: {e}"));
+                        StoreNode::scalar(self.fresh_sym(hint, sty))
+                    }
+                    Ok(PathKind::Struct(struct_id)) => {
+                        // Structs are materialized recursively by field static types.
+                        self.materialize_struct_node(struct_id, hint)
+                    }
+                    Err(msg) => {
+                        // Invalid type name should be surfaced early.
+                        panic!("invalid Type::Path `{hint}`: {msg}");
+                    }
+                }
+            }
 
-    /// Returns an iterator over all address→expression bindings.
-    pub fn iter_bindings(&self) -> impl Iterator<Item = (&(usize, usize), &SymExpr)> {
-        self.store.iter()
-    }
+            Type::Array(inner, len_expr) => {
+                // Length must be constant at runtime for indexing; unknown is allowed at allocation.
+                let len: Option<usize> = eval_len_const_or_err(len_expr);
+                let _ = &**inner; // elements are lazily materialized upon indexed writes/reads
+                StoreNode::array(len)
+            }
 
-    /// Convenience predicate for address membership.
-    pub fn contains(&self, var_id: usize, offset: usize) -> bool {
-        self.store.contains_key(&(var_id, offset))
-    }
-
-    /* --------  mutable façade (wraps functional updates) --------
-       These provide ergonomic &mut self methods while preserving persistence
-       under the hood. They simply rebind `self` to the newly created structure.
-    */
-
-    /// Mutating façade: append a path condition by rebinding the persistent vector.
-    pub fn assert_pc(&mut self, cond: BoolExpr) {
-        // In-place update leveraging structural sharing.
-        self.path_cond.push_back(cond);
-    }
-
-    /// Mutating façade: write by rebinding the persistent map.
-    pub fn write(&mut self, var_id: usize, offset: usize, value: SymExpr) {
-        self.store = self.store.update((var_id, offset), value);
-    }
-
-    /// Mutating façade: remove by rebinding the persistent map and return old value (if any).
-    pub fn kill(&mut self, var_id: usize, offset: usize) -> Option<SymExpr> {
-        let key = (var_id, offset);
-        let old = self.store.get(&key).cloned();
-        self.store = self.store.without(&key);
-        old
+            // Function types are not allowed in value allocation; report as unimplemented.
+            Type::Function { .. } => {
+                unimplemented!(
+                    "alloc_node_for_type: function types are unsupported for value allocation (hint: {hint})"
+                );
+            }
+        }
     }
 }

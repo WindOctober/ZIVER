@@ -3,9 +3,16 @@ use super::*;
 impl File {
     /// Iterate all `Component`s with their (optional) IDs.
     /// Returns `(id, &name, &members)`.
-    pub fn components(&self) -> impl Iterator<Item = (Option<i64>, &String, &Vec<Member>)> {
+    pub fn components(
+        &self,
+    ) -> impl Iterator<Item = (Option<i64>, &String, &Vec<Member>, &Option<Query>)> {
         self.items.iter().filter_map(|item| match item {
-            Item::Component { id, name, members } => Some((*id, name, members)),
+            Item::Component {
+                id,
+                name,
+                members,
+                query,
+            } => Some((*id, name, members, query)),
             _ => None,
         })
     }

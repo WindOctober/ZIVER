@@ -5,6 +5,7 @@ mod utils;
 
 use clap::{ArgAction, Parser};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use crate::checker::check_equivalence;
 use crate::checker::symbolic::context::init_context;
@@ -55,13 +56,9 @@ fn main() {
         };
 
     // Build Context across all modules.
-    let ctx = init_context(&mut modules);
+    let ctx = Rc::new(init_context(&mut modules));
 
-    // If you still need a single File for later passes, you can concatenate items,
-    // or adapt downstream code to consume `ctx` directly.
-
-    // Run your checker over the entry module (modules[0]) or over all modules as you need.
-    if let Err(err) = check_equivalence(&modules[0].file, config) {
+    if let Err(err) = check_equivalence(&modules[0].file, Rc::clone(&ctx), config) {
         eprintln!("✖ Equivalence check failed: {err}");
         std::process::exit(1);
     } else {

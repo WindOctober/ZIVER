@@ -49,4 +49,6 @@ Component IsZeroWordOperation{
         );
         assert_eq(cols.result, cols.is_lower_half_zero * cols.is_upper_half_zero);
     }
+
+    Query(populate,self;eval,cols)
 }
