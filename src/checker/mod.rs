@@ -3,65 +3,153 @@ pub(crate) mod symbolic;
 
 use std::rc::Rc;
 
-use crate::{ast::File, checker::symbolic::context::Context, utils::SetConfig};
-
-pub fn derive_context(_file: &File) -> Context {
-    unimplemented!()
-}
+use crate::{
+    ast::File,
+    checker::symbolic::{
+        context::Context,
+        execute::SymbolicExecutor,
+        expr::{BoolExpr, SymExpr},
+        state::SymState,
+    },
+    utils::SetConfig,
+};
 
 /// Checks the semantic equivalence between `populate` and `eval`
 /// functions within each component of the parsed file.
-pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Result<(), String> {
-    for (_, name, members, query_opt) in file.components() {
-        // Anonymous closure to find a function by name.
+pub fn check_equivalence(file: &File, ctx: Rc<Context>, _config: SetConfig) -> Result<(), String> {
+    // Iterate over all components and their associated queries.
+    for (_, comp_name, members, query_opt) in file.components() {
         let query = match query_opt {
             Some(q) => q,
-            None => return Err(format!("Component `{}` missing `Query` clause", name)),
+            None => {
+                return Err(format!(
+                    "Component `{}` is missing a `Query` clause, which is required for equivalence checking",
+                    comp_name
+                ));
+            }
         };
 
         if query.lhs.is_empty() || query.rhs.is_empty() {
             return Err(format!(
-                "Component `{}`: `Query` sides must be non-empty",
-                name
+                "Component `{}`: both sides of `Query` must be non-empty",
+                comp_name
             ));
         }
 
-        // First path on each side selects the member to check.
-        let lhs_head = query.lhs[0].last().expect("non-empty path");
-        let rhs_head = query.rhs[0].last().expect("non-empty path");
+        // The first path on each side identifies the member (function) to compare.
+        let lhs_head = query.lhs[0]
+            .last()
+            .expect("left-hand side of Query must contain at least one segment");
+        let rhs_head = query.rhs[0]
+            .last()
+            .expect("right-hand side of Query must contain at least one segment");
 
-        let find_fn = |target: &str| members.iter().find(|m| m.name() == target);
+        // Resolve member names to concrete component members.
+        let find_member = |target: &str| members.iter().find(|m| m.name() == target);
 
-        let lhs_member = find_fn(lhs_head.as_str()).ok_or_else(|| {
+        let lhs_member = find_member(lhs_head.as_str()).ok_or_else(|| {
             format!(
-                "Component `{}`: member `{}` not found for LHS of Query",
-                name, lhs_head
+                "Component `{}`: member `{}` not found for the left-hand side of Query",
+                comp_name, lhs_head
             )
         })?;
-        let rhs_member = find_fn(rhs_head.as_str()).ok_or_else(|| {
+        let rhs_member = find_member(rhs_head.as_str()).ok_or_else(|| {
             format!(
-                "Component `{}`: member `{}` not found for RHS of Query",
-                name, rhs_head
+                "Component `{}`: member `{}` not found for the right-hand side of Query",
+                comp_name, rhs_head
             )
         })?;
 
-        // Remaining paths must align 1:1; record them for later processing.
-        let lhs_tail = &query.lhs[1..];
-        let rhs_tail = &query.rhs[1..];
+        // Use the new member method to access the underlying functions.
+        let lhs_func = lhs_member.as_func();
+        let rhs_func = rhs_member.as_func();
 
-        if lhs_tail.len() != rhs_tail.len() {
+        // For now, we assume queries of the canonical form:
+        //   Query(populate,self; eval,cols)
+        if query.lhs.len() != 2 || query.rhs.len() != 2 {
             return Err(format!(
-                "Component `{}`: `Query` sides have different arity (LHS {}, RHS {})",
-                name,
-                lhs_tail.len(),
-                rhs_tail.len()
+                "Component `{}`: currently only queries of the form `Query(f,self; g,cols)` are supported",
+                comp_name
             ));
         }
 
-        // Keep the pairs for future checks (placeholders for now).
-        let _member_pair = (lhs_member, rhs_member);
-        let _arg_pairs: Vec<(&Vec<String>, &Vec<String>)> =
-            lhs_tail.iter().zip(rhs_tail.iter()).collect();
+        let lhs_root_path = &query.lhs[1];
+        let rhs_root_path = &query.rhs[1];
+
+        // Use the method on `Func` to translate query roots into parameter-bound expressions.
+        let lhs_root_expr = lhs_func.query_path_to_param_expr(lhs_root_path)?;
+        let rhs_root_expr = rhs_func.query_path_to_param_expr(rhs_root_path)?;
+
+        // Initialize symbolic states for the two executions.
+        let lhs_init = SymState::new(Rc::clone(&ctx));
+        let rhs_init = SymState::new(Rc::clone(&ctx));
+
+        // Execute both functions symbolically (single-path only for now).
+        let lhs_terms = lhs_func.clone().execute(lhs_init);
+        let rhs_terms = rhs_func.clone().execute(rhs_init);
+
+        if lhs_terms.len() != 1 || rhs_terms.len() != 1 {
+            return Err(format!(
+                "Component `{}`: branching executions are not yet supported (lhs states = {}, rhs states = {})",
+                comp_name,
+                lhs_terms.len(),
+                rhs_terms.len(),
+            ));
+        }
+
+        let (_lhs_ret, lhs_final) = lhs_terms[0].clone();
+        let (_rhs_ret, rhs_final) = rhs_terms[0].clone();
+
+        // Locate the query-specified roots (e.g., `self` and `cols`) in the final stores.
+        let lhs_root_node = lhs_final.query_expr_node(&lhs_root_expr).ok_or_else(|| {
+            format!(
+                "Component `{}`: failed to locate the left root `{:?}` in the final store",
+                comp_name, lhs_root_path
+            )
+        })?;
+
+        let rhs_root_node = rhs_final.query_expr_node(&rhs_root_expr).ok_or_else(|| {
+            format!(
+                "Component `{}`: failed to locate the right root `{:?}` in the final store",
+                comp_name, rhs_root_path
+            )
+        })?;
+
+        // Recursively extract all leaf-level scalar pairs from the two roots.
+        let mut out_pairs: Vec<(SymExpr, SymExpr)> = Vec::new();
+        lhs_root_node.collect_scalar_pairs_with(rhs_root_node, &mut out_pairs)?;
+
+        if out_pairs.is_empty() {
+            return Err(format!(
+                "Component `{}`: no scalar outputs were discovered under the queried roots",
+                comp_name
+            ));
+        }
+
+        // Construct the overall path conditions for the two executions.
+        let pc_lhs = lhs_final.pc();
+        let pc_rhs = rhs_final.pc();
+
+        // TODO: construct input equivalence constraints.
+        let eq_inputs = BoolExpr::Bool(true);
+
+        // Encode the disjunction that at least one output scalar pair differs.
+        let mut diff_atoms = Vec::new();
+        for (a, b) in out_pairs {
+            // Here we assume that BoolExpr can express disequality on SymExpr.
+            diff_atoms.push(BoolExpr::Ne(a, b));
+        }
+        let outputs_diff = BoolExpr::or(diff_atoms);
+
+        // Final formula: both path conditions hold, all inputs coincide,
+        // and at least one observed output scalar differs.
+        let phi = BoolExpr::and(vec![pc_lhs, pc_rhs, eq_inputs, outputs_diff]);
+
+        // TODO: invoke the SMT solver on `phi`.
+        println!(
+            "Component `{}`: generated SMT formula for equivalence checking:\n{}",
+            comp_name, phi
+        );
     }
 
     Ok(())

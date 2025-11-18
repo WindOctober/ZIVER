@@ -38,6 +38,81 @@ impl StoreNode {
             fields: IMap::new(),
         }
     }
+
+    /// Recursively collect pairs of scalar symbolic expressions from `self`
+    /// and `other`. This procedure enforces that the two nodes exhibit an
+    /// identical structural "shape" (same set of fields for structs, same
+    /// index set for arrays) and records all corresponding leaf-level scalar
+    /// expressions as candidate output pairs.
+    pub fn collect_scalar_pairs_with(
+        &self,
+        other: &StoreNode,
+        out: &mut Vec<(SymExpr, SymExpr)>,
+    ) -> Result<(), String> {
+        match (self, other) {
+            // Base case: both nodes are scalar expressions.
+            (StoreNode::Scalar(a), StoreNode::Scalar(b)) => {
+                out.push((a.clone(), b.clone()));
+                Ok(())
+            }
+
+            // Recursive case: structs keyed by identical field identifiers.
+            (StoreNode::Struct { fields: lf }, StoreNode::Struct { fields: rf }) => {
+                if lf.len() != rf.len() {
+                    return Err(format!(
+                        "struct shape mismatch: lhs has {} fields, rhs has {} fields",
+                        lf.len(),
+                        rf.len()
+                    ));
+                }
+
+                // Traverse fields in a deterministic order (sorted by field id)
+                // to obtain a canonical pairing of subnodes.
+                let mut keys: Vec<i64> = lf.keys().cloned().collect();
+                keys.sort_unstable();
+
+                for fid in keys {
+                    let lc = lf.get(&fid).ok_or_else(|| {
+                        format!("lhs is missing field id {} during struct comparison", fid)
+                    })?;
+                    let rc = rf.get(&fid).ok_or_else(|| {
+                        format!("rhs is missing field id {} during struct comparison", fid)
+                    })?;
+                    lc.collect_scalar_pairs_with(rc, out)?;
+                }
+                Ok(())
+            }
+
+            // Recursive case: arrays with compatible lengths and index sets.
+            (StoreNode::Array { len: ll, elems: le }, StoreNode::Array { len: rl, elems: re }) => {
+                if ll != rl {
+                    return Err(format!("array length mismatch: lhs {:?}, rhs {:?}", ll, rl));
+                }
+
+                // Require that every materialized index on the lhs is also
+                // materialized on the rhs, and recurse on those indices.
+                let mut idxs: Vec<usize> = le.keys().cloned().collect();
+                idxs.sort_unstable();
+
+                for i in idxs {
+                    let lc = le.get(&i).ok_or_else(|| {
+                        format!("lhs is missing index {} during array comparison", i)
+                    })?;
+                    let rc = re.get(&i).ok_or_else(|| {
+                        format!("rhs is missing index {} during array comparison", i)
+                    })?;
+                    lc.collect_scalar_pairs_with(rc, out)?;
+                }
+                Ok(())
+            }
+
+            // Any remaining combination indicates a structural incompatibility.
+            (l, r) => Err(format!(
+                "store shape mismatch: lhs node `{:?}`, rhs node `{:?}`",
+                l, r
+            )),
+        }
+    }
 }
 
 /// Persistent store mapping variable ids to nodes.
@@ -56,14 +131,47 @@ impl Store {
             vars: self.vars.update(id, node),
         }
     }
+
+    /// Resolve an expression to a store node (supports only Path).
+    pub fn query_scalar_node(&self, e: &Expr) -> Option<&StoreNode> {
+        match e {
+            Expr::Path { ref_id, .. } => {
+                let vid = (*ref_id)?;
+                self.get(vid)
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+    }
+
+    /// Load a scalar symbolic value from the store; reject arrays/structs.
+    pub fn query_scalar(&self, e: &Expr) -> Option<SymExpr> {
+        let node = self.query_scalar_node(e)?;
+        match node {
+            StoreNode::Scalar(se) => Some(se.clone()),
+            StoreNode::Array { .. } => panic!("array used as scalar without indexing"),
+            StoreNode::Struct { .. } => panic!("struct used as scalar without field selection"),
+        }
+    }
+}
+
+/// Execution status of the current state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecStatus {
+    Step,
+    Continue,
+    Break,
+    Return,
 }
 
 /// Symbolic state with path condition and persistent store.
 #[derive(Clone, Debug)]
 pub struct SymState {
     pub ctx: Rc<Context>,
-    pub path_cond: BoolExpr,
+    pub path_cond: Vec<BoolExpr>,
     pub store: Store,
+    pub status: ExecStatus,
     fresh: usize,
 }
 
@@ -71,15 +179,78 @@ impl SymState {
     pub fn new(ctx: Rc<Context>) -> Self {
         Self {
             ctx,
-            path_cond: BoolExpr::Bool(true),
+            path_cond: Vec::new(),
             store: Store::default(),
+            status: ExecStatus::Step,
             fresh: 0,
+        }
+    }
+
+    /// Return a new state with an additional path constraint appended.
+    pub fn with_pc(mut self, cond: BoolExpr) -> Self {
+        self.path_cond.push(cond);
+        self
+    }
+
+    /// Conjoin all accumulated path conditions; returns `true` if empty.
+    pub fn pc(&self) -> BoolExpr {
+        BoolExpr::and(self.path_cond.clone())
+    }
+
+    /// Set execution status and return the updated state.
+    pub fn with_status(mut self, status: ExecStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// State is active.
+    pub fn is_active(&self) -> bool {
+        matches!(self.status, ExecStatus::Step)
+    }
+
+    /// State is terminal for the current control region (Break/Return).
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self.status, ExecStatus::Step)
+    }
+
+    pub fn query_expr_node(&self, e: &Expr) -> Option<&StoreNode> {
+        match e {
+            Expr::Path { ref_id, .. } => {
+                let vid = (*ref_id)?;
+                self.store.get(vid)
+            }
+            Expr::Field { base, name, .. } => {
+                let sid = match self.ctx.infer_expr_type(base.as_ref()) {
+                    Some(Type::Path {
+                        ref_id: Some(sid), ..
+                    }) => sid,
+                    _ => return None,
+                };
+                let fid = self.ctx.field_id_of(sid, name)?;
+                let parent = self.query_expr_node(base.as_ref())?;
+                match parent {
+                    StoreNode::Struct { fields } => fields.get(&fid),
+                    _ => None,
+                }
+            }
+            Expr::Index(base, idx) => {
+                let idx_val = match **idx {
+                    Expr::Int(k) => k as usize,
+                    _ => unimplemented!("array index must be concrete literal"),
+                };
+                let parent = self.query_expr_node(base.as_ref())?;
+                match parent {
+                    StoreNode::Array { elems, .. } => elems.get(&idx_val),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
     /// Map an AST type to a symbolic sort for variable creation.
     /// Only builtin scalars are mappable; structs/arrays/functions are not.
-    fn type_map(&self, ty: &Type) -> Result<SymType, String> {
+    pub fn type_map(&self, ty: &Type) -> Result<SymType, String> {
         match self.ctx.classify_type(ty) {
             Ok(PathKind::Builtin) => {
                 // Parse terminal name: "bool" | "field" | "uN" | "iN".

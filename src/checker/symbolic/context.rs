@@ -48,12 +48,20 @@ pub struct Context {
     struct_fields: HashMap<i64, HashMap<String, MemberIndex>>, // struct_id -> { name -> member }
     types: TypeCtx,
     struct_index: HashMap<String, i64>, // struct name -> struct_id
+    func_owner: HashMap<i64, i64>,      // record method ownership (func_id -> struct_id)
 }
 
 impl Context {
     /// Returns the member map of a struct if available.
     pub fn struct_members(&self, struct_id: i64) -> Option<&HashMap<String, MemberIndex>> {
         self.struct_fields.get(&struct_id)
+    }
+
+    /// Resolve field_id by (struct_id, field name).
+    pub fn field_id_of(&self, struct_id: i64, name: &str) -> Option<i64> {
+        self.struct_members(struct_id)
+            .and_then(|m| m.get(name))
+            .and_then(|mi| mi.as_field_id())
     }
 
     /// Query the static type of a non-function id.
@@ -96,6 +104,69 @@ impl Context {
             return Ok(PathKind::Builtin);
         }
         Err(format!("unknown type path by name: {}", last))
+    }
+
+    /// Best-effort static type inference from ids already attached to nodes.
+    pub fn infer_expr_type(&self, e: &Expr) -> Option<Type> {
+        match e {
+            Expr::Int(_) => None,
+            Expr::Bool(_) => None,
+
+            Expr::Path { ref_id, .. } => {
+                if let Some(id) = *ref_id {
+                    if let Some(ty) = self.types.var_types.get(&id) {
+                        return Some(ty.clone());
+                    }
+                    if let Some(ty) = self.types.const_types.get(&id) {
+                        return Some(ty.clone());
+                    }
+                    if self.funcs.contains_key(&id) {
+                        return Some(Type::Function { ref_id: Some(id) });
+                    }
+                }
+                None
+            }
+
+            Expr::Field { ref_id, base, .. } => {
+                if let Some(id) = *ref_id {
+                    if let Some(ty) = self.types.field_types.get(&id) {
+                        return Some(ty.clone());
+                    }
+                    if self.funcs.contains_key(&id) {
+                        return Some(Type::Function { ref_id: Some(id) });
+                    }
+                }
+                self.infer_expr_type(base)
+            }
+
+            Expr::Call(callee, _args) => self.infer_expr_type(callee),
+
+            Expr::Index(base, _idx) => {
+                if let Some(Type::Array(inner, _)) = self.infer_expr_type(base) {
+                    return Some((*inner).clone());
+                }
+                None
+            }
+
+            Expr::Binary { .. } => None,
+            Expr::Paren(inner) => self.infer_expr_type(inner),
+        }
+    }
+
+    /// Query function signature by id.
+    pub fn fn_sig(&self, id: i64) -> Option<&(Vec<Type>, Option<Type>)> {
+        self.types.fn_sigs.get(&id)
+    }
+
+    /// Returns the struct_id that owns this function if it is a method.
+    /// None means it's a free function (not a struct method).
+    pub fn method_owner(&self, func_id: i64) -> Option<i64> {
+        self.func_owner.get(&func_id).copied()
+    }
+
+    /// Convenience: check if `func_id` is a method of `struct_id`.
+    pub fn is_method_of(&self, func_id: i64, struct_id: i64) -> bool {
+        self.func_owner.get(&func_id).copied() == Some(struct_id)
     }
 }
 
@@ -243,6 +314,8 @@ pub fn init_context(mods: &mut [Module]) -> Context {
                                     .get_mut(&struct_id)
                                     .unwrap()
                                     .insert(fun.name.clone(), MemberIndex::Method { func_id: fid });
+
+                                ctx.func_owner.insert(fid, struct_id);
                             }
                         }
                     }
@@ -312,7 +385,7 @@ fn resolve_expr_ids_flat(e: &mut Expr, scope: &Scope, ctx: &mut Context) {
             resolve_expr_ids_flat(base, scope, ctx);
 
             // Determine the static type of the base expression.
-            let base_ty = infer_expr_type(base, ctx);
+            let base_ty = ctx.infer_expr_type(base);
 
             // If base is a struct value (Type::Path with struct_id), resolve the member.
             if let Some(Type::Path {
@@ -444,56 +517,4 @@ fn resolve_stmt_ids_flat(s: &mut Stmt, ctx: &mut Context, scope: &mut Scope) {
 /// Resolve the lvalue head now; field tails are deferred to exec-time.
 fn resolve_lvalue_ids_flat(lv: &mut LValue, scope: &Scope) {
     lv.ref_id = scope.resolve_path(&lv.head);
-    for t in lv.tails.iter_mut() {
-        if let LvTail::Field { ref_id, .. } = t {
-            *ref_id = None;
-        }
-    }
-}
-
-/// Best-effort static type inference from ids already attached to nodes.
-fn infer_expr_type(e: &Expr, ctx: &Context) -> Option<Type> {
-    match e {
-        Expr::Int(_) => None,
-        Expr::Bool(_) => None,
-
-        Expr::Path { ref_id, .. } => {
-            if let Some(id) = *ref_id {
-                if let Some(ty) = ctx.types.var_types.get(&id) {
-                    return Some(ty.clone());
-                }
-                if let Some(ty) = ctx.types.const_types.get(&id) {
-                    return Some(ty.clone());
-                }
-                if ctx.funcs.contains_key(&id) {
-                    return Some(Type::Function { ref_id: Some(id) });
-                }
-            }
-            None
-        }
-
-        Expr::Field { ref_id, base, .. } => {
-            if let Some(id) = *ref_id {
-                if let Some(ty) = ctx.types.field_types.get(&id) {
-                    return Some(ty.clone());
-                }
-                if ctx.funcs.contains_key(&id) {
-                    return Some(Type::Function { ref_id: Some(id) });
-                }
-            }
-            infer_expr_type(base, ctx)
-        }
-
-        Expr::Call(callee, _args) => infer_expr_type(callee, ctx),
-
-        Expr::Index(base, _idx) => {
-            if let Some(Type::Array(inner, _)) = infer_expr_type(base, ctx) {
-                return Some((*inner).clone());
-            }
-            None
-        }
-
-        Expr::Binary { .. } => None,
-        Expr::Paren(inner) => infer_expr_type(inner, ctx),
-    }
 }

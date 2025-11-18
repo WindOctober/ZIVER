@@ -437,7 +437,6 @@ fn parse_lvalue(p: Pair<Rule>) -> Result<LValue> {
                     .ok_or_else(|| anyhow!("field_tail missing ident"))?;
                 tails.push(LvTail::Field {
                     name: seg.as_str().to_string(),
-                    ref_id: None,
                 });
             }
             Rule::index_tail => {

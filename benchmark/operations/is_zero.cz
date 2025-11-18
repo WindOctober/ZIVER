@@ -1,4 +1,32 @@
-Struct IsZeroOperation{
-    input inverse: F,
-    output result: F,
+// crates/core/machine/src/operations/is_zero.rs
+Struct IsZeroOperation {
+  input inverse: field,
+  output result: field,
+}
+
+Component IsZeroOperation {
+  Computation populate(self, a: u32) -> u32 {
+    return self.populate_from_field_element(to_field(a));
+  }
+
+  Computation populate_from_field_element(self, a: field) -> u32 {
+    if a == 0 {
+      self.inverse = 0;
+      self.result = 1;
+    } else {
+      self.inverse = a.inverse();
+      self.result = 0;
+    }
+    let prod = self.inverse * a;
+    assert_bool((prod == 1) | (prod == 0),);
+    return (a == 0);
+  }
+
+  Constraint eval(self, a: field, is_real: field) {
+    field one = 1;
+    field is_zero = one - self.inverse * a;
+    assert_eq(is_zero , self.result ,);
+    assert_bool(  self.result ,);
+    assert_eq(a * self.result , 0,);
+  }
 }

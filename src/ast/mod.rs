@@ -146,8 +146,8 @@ pub struct LValue {
 
 #[derive(Debug, Clone)]
 pub enum LvTail {
-    // field access with ref_id to Field
-    Field { name: String, ref_id: Option<i64> },
+    // field access
+    Field { name: String },
     Index(Expr),
 }
 

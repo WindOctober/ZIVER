@@ -1,3 +1,4 @@
+// crates/core/machine/src/operations/is_zero_word.rs
 import is_zero;
 
 const usize WORD_SIZE = 4;
