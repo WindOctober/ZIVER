@@ -47,7 +47,7 @@ constraint  = { "Constraint"  ~ func_sig ~ block }
 // === Function signature ===
 func_sig    = { ident ~ "(" ~ param_list? ~ ")" ~ ( "->" ~ type_ref )? }
 param_list  = { param ~ ( "," ~ param )* }
-param       = { "self" | ident ~ ":" ~ type_ref }
+param       = { "self" | io_prefix? ~ ident ~ ":" ~ type_ref }
 
 // === Blocks and statements ===
 block     = { "{" ~ stmt* ~ "}" }

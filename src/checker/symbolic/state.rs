@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::ast::*;
 use crate::checker::symbolic::context::{Context, PathKind};
 use crate::checker::symbolic::eval_index_const_or_err;
-use crate::checker::symbolic::expr::{BoolExpr, SymExpr, SymType};
+use crate::checker::symbolic::expr::{BoolExpr, FIELD_MODULUS, SymExpr, SymType};
 
 /// Persistent store node for symbolic memory.
 #[derive(Clone, Debug)]
@@ -185,6 +185,18 @@ impl SymState {
             fresh: 0,
         }
     }
+    /// Returns the next fresh index for symbol allocation.
+    pub fn fresh_index(&self) -> usize {
+        self.fresh
+    }
+
+    /// Overrides the starting fresh index.
+    /// This is intended for orchestrating multiple symbolic runs that
+    /// should not reuse symbol names.
+    pub fn with_fresh_start(mut self, start: usize) -> Self {
+        self.fresh = start;
+        self
+    }
 
     /// Return a new state with an additional path constraint appended.
     pub fn with_pc(mut self, cond: BoolExpr) -> Self {
@@ -211,6 +223,15 @@ impl SymState {
     /// State is terminal for the current control region (Break/Return).
     pub fn is_terminal(&self) -> bool {
         !matches!(self.status, ExecStatus::Step)
+    }
+
+    /// Returns `true` if the given AST expression has field sort.
+    pub fn is_field_expr(&self, e: &Expr) -> bool {
+        if let Some(ty) = self.ctx.infer_expr_type(e) {
+            matches!(self.type_map(&ty), Ok(SymType::F))
+        } else {
+            false
+        }
     }
 
     pub fn query_expr_node(&self, e: &Expr) -> Option<&StoreNode> {
@@ -294,7 +315,19 @@ impl SymState {
     pub fn fresh_sym(&mut self, hint: &str, ty: SymType) -> SymExpr {
         let id = self.fresh;
         self.fresh += 1;
-        SymExpr::Var(format!("{}_{}", hint, id), ty)
+        let v = SymExpr::Var(format!("{}_{}", hint, id), ty.clone());
+
+        // For field-typed symbols, constrain them to the canonical range [0, p).
+        if let SymType::F = ty {
+            let zero = SymExpr::Int(0);
+            let p = SymExpr::Int(FIELD_MODULUS);
+            // 0 <= v
+            self.path_cond.push(zero.le(v.clone()));
+            // v < p
+            self.path_cond.push(v.clone().lt(p));
+        }
+
+        v
     }
 
     /// Initializes parameters with fresh symbols.
@@ -314,7 +347,7 @@ impl SymState {
                         self.store = self.store.clone().set(vid, node);
                     }
                 }
-                Param::Typed { id, name, ty } => {
+                Param::Typed { id, name, ty, .. } => {
                     if let Some(vid) = *id {
                         let node = self.alloc_node_for_type(name, ty);
                         self.store = self.store.clone().set(vid, node);

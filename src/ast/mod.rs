@@ -38,7 +38,7 @@ pub enum Item {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IOType {
     Input,
     Output,
@@ -80,6 +80,7 @@ pub enum Param {
         id: Option<i64>,
         name: String,
         ty: Type,
+        io: IOType,
     },
 }
 

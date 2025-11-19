@@ -246,6 +246,28 @@ fn parse_param(p: Pair<Rule>) -> Result<Param> {
                     id: None,
                     name: name.to_string(),
                     ty,
+                    io: IOType::Input,
+                })
+            }
+            Rule::io_prefix => {
+                // Case: [io_prefix, ident, type_ref]
+                let io = parse_io_prefix(first)?;
+                let name_pair = it
+                    .next()
+                    .ok_or_else(|| anyhow!("missing ident after io_prefix in parameter"))?;
+                if name_pair.as_rule() != Rule::ident {
+                    return Err(anyhow!("parameter name must be ident"));
+                }
+                let name = name_pair.as_str().to_string();
+                let ty_pair = it
+                    .next()
+                    .ok_or_else(|| anyhow!("missing type after parameter '{}'", name))?;
+                let ty = parse_type(ty_pair)?;
+                Ok(Param::Typed {
+                    id: None,
+                    name,
+                    ty,
+                    io,
                 })
             }
             _ => Err(anyhow!(

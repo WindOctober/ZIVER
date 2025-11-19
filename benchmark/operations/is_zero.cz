@@ -5,7 +5,7 @@ Struct IsZeroOperation {
 }
 
 Component IsZeroOperation {
-  Computation populate(self, a: field) -> field {
+  Computation populate(self, input a: field) -> field {
     if a == 0 {
       self.inverse = 0;
       self.result = 1;
@@ -16,7 +16,7 @@ Component IsZeroOperation {
     return self.result;
   }
 
-  Constraint eval(self, a: field,cols:IsZeroOperation, is_real: field) {
+  Constraint eval(self, input a: field,cols:IsZeroOperation, is_real: field) {
     assert_bool(cols.result);
 
     field one = 1;
@@ -25,5 +25,5 @@ Component IsZeroOperation {
 
     assert_eq(cols.result * a, 0);
   }
-  Query(populate,self;eval,cols)
+  Query(populate,self,a;eval,cols,a)
 }

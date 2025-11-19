@@ -72,6 +72,34 @@ impl Type {
 }
 
 impl Func {
+    /// Batch-resolve all query root paths to parameter expressions.
+    pub fn query_root_exprs(&self, paths: &[Vec<String>]) -> Result<Vec<Expr>, String> {
+        paths
+            .iter()
+            .map(|p| self.query_path_to_param_expr(p))
+            .collect()
+    }
+
+    /// Return the IO role for a scalar parameter referenced by a query path.
+    /// `self` is handled via struct field IO and returns `None`.
+    pub fn param_io_for_query_path(&self, path: &[String]) -> Option<IOType> {
+        let head = path.first()?;
+        for p in &self.params {
+            match p {
+                Param::SelfParam { .. } => {
+                    if head == "self" {
+                        return None;
+                    }
+                }
+                Param::Typed { name, io, .. } if name == head => {
+                    return Some(io.clone());
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Translate a query-side path (e.g., ["self"] or ["cols"]) into an
     /// expression that references the corresponding parameter binding
     /// inside this function. Currently, only single-segment paths are

@@ -106,6 +106,11 @@ impl Z3Encoder {
                 let e_z3 = self.encode_int(e);
                 c.ite(&t_z3, &e_z3)
             }
+            SymExpr::Mod(a, b) => {
+                let az = self.encode_int(a);
+                let bz = self.encode_int(b);
+                az.modulo(&bz)
+            }
         }
     }
 

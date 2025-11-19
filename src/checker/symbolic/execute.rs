@@ -733,22 +733,59 @@ impl Expr {
                     _ => panic!("indexing requires array base"),
                 }
             }
-
             Expr::Binary {
                 op: BinOp::Add,
                 lhs,
                 rhs,
-            } => eval_bin("Add", *lhs, *rhs, state, |a, b| a + b),
+            } => {
+                // Decide field vs integer addition by static type.
+                let bin = Expr::Binary {
+                    op: BinOp::Add,
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                };
+                if state.is_field_expr(&bin) {
+                    eval_bin("Add", *lhs, *rhs, state, |a, b| (a + b).mod_field())
+                } else {
+                    eval_bin("Add", *lhs, *rhs, state, |a, b| a + b)
+                }
+            }
+
             Expr::Binary {
                 op: BinOp::Sub,
                 lhs,
                 rhs,
-            } => eval_bin("Sub", *lhs, *rhs, state, |a, b| a - b),
+            } => {
+                // Field subtraction is modeled modulo the field prime.
+                let bin = Expr::Binary {
+                    op: BinOp::Sub,
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                };
+                if state.is_field_expr(&bin) {
+                    eval_bin("Sub", *lhs, *rhs, state, |a, b| (a - b).mod_field())
+                } else {
+                    eval_bin("Sub", *lhs, *rhs, state, |a, b| a - b)
+                }
+            }
+
             Expr::Binary {
                 op: BinOp::Mul,
                 lhs,
                 rhs,
-            } => eval_bin("Mul", *lhs, *rhs, state, |a, b| a * b),
+            } => {
+                // Field multiplication is reduced modulo the field prime.
+                let bin = Expr::Binary {
+                    op: BinOp::Mul,
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                };
+                if state.is_field_expr(&bin) {
+                    eval_bin("Mul", *lhs, *rhs, state, |a, b| (a * b).mod_field())
+                } else {
+                    eval_bin("Mul", *lhs, *rhs, state, |a, b| a * b)
+                }
+            }
 
             Expr::Binary {
                 op: BinOp::BitAnd,
@@ -1022,17 +1059,22 @@ fn eval_builtin_method_call(
     match (sty, method_name) {
         // field.inverse() : field
         (SymType::F, "inverse") => {
+            // Fresh field-typed variable for the inverse.
             let inv = s1.fresh_sym("inverse", SymType::F);
 
             let zero = SymExpr::Int(0);
             let one = SymExpr::Int(1);
 
-            // (a == 0) OR (a * inv == 1)
+            // (a == 0)
             let recv_eq_zero = recv.clone().eq_to(zero);
-            let recv_times_inv_eq_one = (recv.clone() * inv.clone()).eq_to(one);
-            let guard = BoolExpr::or(vec![recv_eq_zero, recv_times_inv_eq_one]);
 
+            // ((a * inv) mod p == 1)  -- true field inverse relation
+            let recv_times_inv = (recv.clone() * inv.clone()).mod_field();
+            let recv_times_inv_eq_one = recv_times_inv.eq_to(one);
+
+            let guard = BoolExpr::or(vec![recv_eq_zero, recv_times_inv_eq_one]);
             s1 = s1.with_pc(guard);
+
             Vector::unit((inv, s1))
         }
 

@@ -494,7 +494,7 @@ fn resolve_func_flat(fun: &mut Func, ctx: &mut Context, scope: &mut Scope) {
                     ctx.types.var_types.insert(nid, ty);
                 }
             }
-            Param::Typed { id, name, ty } => {
+            Param::Typed { id, name, ty, .. } => {
                 let nid = fresh_id(&mut ctx.next_sym_id);
                 *id = Some(nid);
                 resolve_type_ids_flat(ty, scope, ctx);

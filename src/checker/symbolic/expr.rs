@@ -1,6 +1,9 @@
 use std::fmt::{Display, Formatter};
 use std::ops::{Add, Div, Mul, Sub};
 
+// BabyBear field modulus used by SP1 backend: p = 2^31 - 2^27 + 1.
+pub const FIELD_MODULUS: i128 = 2_013_265_921;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SymType {
     /// Finite field element (generic field `F`).
@@ -25,6 +28,7 @@ pub enum SymExpr {
     Sub(Box<SymExpr>, Box<SymExpr>),
     Div(Box<SymExpr>, Box<SymExpr>), // Euclidean integer division (maps to `div`)
     Ite(Box<BoolExpr>, Box<SymExpr>, Box<SymExpr>),
+    Mod(Box<SymExpr>, Box<SymExpr>), // Integer modulo: models `(mod a b)` for SMT-LIB NIA.
 }
 
 /// Boolean expressions used in guards and `ite`.
@@ -43,6 +47,11 @@ pub enum BoolExpr {
 }
 
 impl SymExpr {
+    /// Wraps the expression in a BabyBear field reduction `(e mod p)`.
+    pub fn mod_field(self) -> Self {
+        SymExpr::Mod(Box::new(self), Box::new(SymExpr::Int(FIELD_MODULUS)))
+    }
+
     /// Builds an `ite` expression with a Boolean guard.
     pub fn ite(cond: BoolExpr, then_e: SymExpr, else_e: SymExpr) -> Self {
         SymExpr::Ite(Box::new(cond), Box::new(then_e), Box::new(else_e))
@@ -268,7 +277,7 @@ impl BoolExpr {
     }
 }
 
-/* ---------- SMT-LIB format transform (minimal) ---------- */
+/* ---------- Formula Display ----------- */
 
 impl Display for SymType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -310,41 +319,72 @@ impl Display for SymExpr {
             SymExpr::Sub(a, b) => write!(f, "(- {} {})", a, b),
             SymExpr::Div(a, b) => write!(f, "(div {} {})", a, b),
             SymExpr::Ite(c, t, e) => write!(f, "(ite {} {} {})", c, t, e),
+            SymExpr::Mod(a, b) => write!(f, "(mod {} {})", a, b),
         }
     }
 }
 
-impl Display for BoolExpr {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl BoolExpr {
+    /// Pretty-print with indentation for nested Boolean structure.
+    fn fmt_with_indent(&self, f: &mut Formatter<'_>, indent: usize) -> std::fmt::Result {
+        fn write_indent(f: &mut Formatter<'_>, n: usize) -> std::fmt::Result {
+            for _ in 0..n {
+                write!(f, " ")?;
+            }
+            Ok(())
+        }
+
         match self {
             BoolExpr::Bool(b) => write!(f, "{}", if *b { "true" } else { "false" }),
-            BoolExpr::Not(x) => write!(f, "(not {})", x),
+
+            BoolExpr::Not(x) => {
+                write!(f, "(not ")?;
+                x.fmt_with_indent(f, indent + 2)?;
+                write!(f, ")")
+            }
+
             BoolExpr::And(xs) => {
                 if xs.is_empty() {
                     return write!(f, "true");
                 }
                 write!(f, "(and")?;
                 for x in xs {
-                    write!(f, " {}", x)?;
+                    write!(f, "\n")?;
+                    write_indent(f, indent + 2)?;
+                    x.fmt_with_indent(f, indent + 2)?;
                 }
+                write!(f, "\n")?;
+                write_indent(f, indent)?;
                 write!(f, ")")
             }
+
             BoolExpr::Or(xs) => {
                 if xs.is_empty() {
                     return write!(f, "false");
                 }
                 write!(f, "(or")?;
                 for x in xs {
-                    write!(f, " {}", x)?;
+                    write!(f, "\n")?;
+                    write_indent(f, indent + 2)?;
+                    x.fmt_with_indent(f, indent + 2)?;
                 }
+                write!(f, "\n")?;
+                write_indent(f, indent)?;
                 write!(f, ")")
             }
-            BoolExpr::Eq(a, b) => write!(f, "(= {} {})", a, b),
-            BoolExpr::Ne(a, b) => write!(f, "(not (= {} {}))", a, b),
-            BoolExpr::Le(a, b) => write!(f, "(<= {} {})", a, b),
-            BoolExpr::Lt(a, b) => write!(f, "(< {} {})", a, b),
-            BoolExpr::Ge(a, b) => write!(f, "(>= {} {})", a, b),
-            BoolExpr::Gt(a, b) => write!(f, "(> {} {})", a, b),
+
+            BoolExpr::Eq(a, b) => write!(f, "({} = {})", a, b),
+            BoolExpr::Ne(a, b) => write!(f, "({} != {})", a, b),
+            BoolExpr::Le(a, b) => write!(f, "({} <= {})", a, b),
+            BoolExpr::Lt(a, b) => write!(f, "({} < {})", a, b),
+            BoolExpr::Ge(a, b) => write!(f, "({} >= {})", a, b),
+            BoolExpr::Gt(a, b) => write!(f, "({} > {})", a, b),
         }
+    }
+}
+
+impl Display for BoolExpr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.fmt_with_indent(f, 0)
     }
 }
