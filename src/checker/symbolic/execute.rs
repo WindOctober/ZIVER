@@ -1,9 +1,10 @@
 use im::Vector;
 
 use crate::{
-    ast::{BinOp, Expr, Func, LValue, LvTail, Member, Stmt, Type},
+    ast::{BinOp, Expr, Func, LValue, LvTail, Member, Param, Stmt, Type},
     checker::symbolic::{
-        context::Context,
+        context::{Context, PathKind},
+        eval_index_const_or_err,
         expr::{BoolExpr, SymExpr, SymType},
         state::{ExecStatus, Store, StoreNode, SymState},
     },
@@ -32,6 +33,7 @@ fn write_to_lvalue(ctx: &Context, store: Store, lv: &LValue, val: SymExpr) -> St
 
     fn write_tail(
         ctx: &Context,
+        store: &Store,
         mut node: StoreNode,
         cur_ty: &mut Type, // static type accumulator
         tails: &[LvTail],
@@ -80,7 +82,7 @@ fn write_to_lvalue(ctx: &Context, store: Store, lv: &LValue, val: SymExpr) -> St
                     .get(&fid)
                     .cloned()
                     .unwrap_or_else(|| panic!("field `{}` (id={}) not materialized", name, fid));
-                let new_child = write_tail(ctx, child, cur_ty, &tails[1..], val);
+                let new_child = write_tail(ctx, store, child, cur_ty, &tails[1..], val);
                 let new_fields = fields.update(fid, new_child);
                 StoreNode::Struct { fields: new_fields }
             }
@@ -93,10 +95,12 @@ fn write_to_lvalue(ctx: &Context, store: Store, lv: &LValue, val: SymExpr) -> St
                 };
                 *cur_ty = inner;
 
-                let idx = match idx_expr {
-                    Expr::Int(k) => *k as usize,
-                    _ => panic!("array index must be a concrete usize literal"),
-                };
+                let idx =
+                    eval_index_const_or_err(ctx, Some(store), idx_expr).unwrap_or_else(|| {
+                        panic!(
+                            "array index must be a concrete integer literal or constant identifier"
+                        )
+                    });
                 if let Some(l) = *len {
                     if idx >= l {
                         panic!("array index {} out of bounds {}", idx, l);
@@ -117,7 +121,7 @@ fn write_to_lvalue(ctx: &Context, store: Store, lv: &LValue, val: SymExpr) -> St
         }
     }
 
-    let updated = write_tail(ctx, root, &mut cur_ty, &lv.tails, val);
+    let updated = write_tail(ctx, &store, root, &mut cur_ty, &lv.tails, val);
     store.set(head_id, updated)
 }
 
@@ -284,9 +288,222 @@ impl SymbolicExecutor for Stmt {
                 Vector::unit((None, s1))
             }
 
-            Stmt::For { .. } => Vector::unit((None, st)),
+            Stmt::For {
+                id,
+                var: _,
+                start,
+                end,
+                body,
+            } => {
+                // Enforce that the loop bounds are compile-time constants
+                // (literals or constant identifiers).
+                let lo = eval_index_const_or_err(&st.ctx, None, &start).unwrap_or_else(|| {
+                    panic!(
+                        "for-loop lower bound must be a constant integer or const identifier: `{:?}`",
+                        start
+                    )
+                });
+                let hi = eval_index_const_or_err(&st.ctx, None, &end).unwrap_or_else(|| {
+                    panic!(
+                        "for-loop upper bound must be a constant integer or const identifier: `{:?}`",
+                        end
+                    )
+                });
 
-            Stmt::Call { .. } => Vector::unit((None, st)),
+                // Rust-style semantics: if lo >= hi, the loop body is skipped.
+                if lo >= hi {
+                    return Vector::unit((None, st));
+                }
+
+                let vid = id.expect("loop variable id must be assigned during resolve");
+
+                // Start from the incoming state; single-path unrolling for now.
+                let mut live: Vector<SymState> = Vector::unit(st);
+                let mut terminals: Vector<(Option<SymExpr>, SymState)> = Vector::new();
+
+                for k in lo..hi {
+                    let mut next_live: Vector<SymState> = Vector::new();
+
+                    for s in live.into_iter() {
+                        let mut s_iter = s.clone();
+                        s_iter.store = s_iter
+                            .store
+                            .set(vid, StoreNode::Scalar(SymExpr::Int(k as i128)));
+
+                        let mut inner_live: Vector<SymState> = Vector::unit(s_iter);
+
+                        for stmt in body.clone() {
+                            let mut tmp: Vector<SymState> = Vector::new();
+                            for s_inner in inner_live.into_iter() {
+                                if !s_inner.is_active() {
+                                    tmp.push_back(s_inner);
+                                    continue;
+                                }
+
+                                let res = stmt.clone().execute(s_inner);
+                                if res.is_empty() {
+                                    panic!("loop body statement produced no successor states");
+                                }
+                                if res.len() != 1 {
+                                    panic!("branching inside for-loop body is not supported");
+                                }
+
+                                let (ret, s_next) = res[0].clone();
+                                if let Some(rv) = ret {
+                                    // Propagate the return value and status out of the loop.
+                                    terminals.push_back((
+                                        Some(rv),
+                                        s_next.with_status(ExecStatus::Return),
+                                    ));
+                                } else {
+                                    tmp.push_back(s_next);
+                                }
+                            }
+                            inner_live = tmp;
+                            if inner_live.is_empty() {
+                                break;
+                            }
+                        }
+
+                        for s_final in inner_live {
+                            next_live.push_back(s_final);
+                        }
+                    }
+
+                    live = next_live;
+                    // If a return has been produced, we can break out of the entire for-loop early.
+                    if !terminals.is_empty() || live.is_empty() {
+                        break;
+                    }
+                }
+
+                if !terminals.is_empty() {
+                    // Allow treating multiple returns as multiple paths; given your current
+                    // single-path design, you may also panic when len != 1 if necessary.
+                    return terminals;
+                }
+
+                if live.len() != 1 {
+                    panic!("branching across for-loop iterations is not supported");
+                }
+                let s_final = live[0].clone();
+                Vector::unit((None, s_final))
+            }
+
+            Stmt::Call { callee, args } => {
+                // Statement-level calls are modeled as concrete invocations of
+                // the target function or method. The callee may be a free
+                // function or a struct method `x.m(...)`.
+
+                // Evaluate arguments sequentially under single-path semantics.
+                let mut s = st;
+                let mut arg_vals = Vec::with_capacity(args.len());
+                for arg in args {
+                    let vals = arg.eval(s);
+                    if vals.len() != 1 {
+                        panic!("branching in call argument is not supported");
+                    }
+                    let (v, s1) = vals[0].clone();
+                    arg_vals.push(v);
+                    s = s1;
+                }
+
+                // Normalize the callee to an expression and resolve the target.
+                let callee_expr = lvalue_to_expr(&callee);
+                let (fid, receiver_info) = resolve_callee_expr(&s, &callee_expr);
+
+                // Retrieve the callee body from the global context.
+                let func = s
+                    .ctx
+                    .func_def(fid)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("missing function body for id {}", fid));
+
+                // Instantiate a callee state that shares context, store, and
+                // accumulated path condition with the caller.
+                let mut callee_state = s.clone();
+                callee_state.status = ExecStatus::Step;
+
+                // Initialize formal parameters from evaluated arguments.
+                // For methods, the receiver node is aliased through `self`.
+                let mut arg_iter = arg_vals.into_iter();
+                let mut self_binding: Option<(i64, i64)> = None; // (caller_vid, callee_vid)
+
+                for p in &func.params {
+                    match p {
+                        Param::SelfParam { id } => {
+                            let callee_vid =
+                                id.expect("self parameter id must be assigned during resolve");
+
+                            let (caller_vid, struct_id) = receiver_info
+                                .unwrap_or_else(|| panic!("self parameter without receiver"));
+
+                            let recv_node = callee_state
+                                .store
+                                .get(caller_vid)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "receiver variable id {} (struct_id={}) not found in store",
+                                        caller_vid, struct_id
+                                    )
+                                });
+
+                            callee_state.store =
+                                callee_state.store.clone().set(callee_vid, recv_node);
+                            self_binding = Some((caller_vid, callee_vid));
+                        }
+
+                        Param::Typed { id, ty, .. } => {
+                            let callee_vid =
+                                id.expect("parameter id must be assigned during resolve");
+                            let value = arg_iter
+                                .next()
+                                .unwrap_or_else(|| panic!("insufficient arguments in call"));
+
+                            if !ty.is_scalar(&callee_state.ctx) {
+                                panic!(
+                                    "non-scalar parameter types in calls are not yet supported: `{:?}`",
+                                    ty
+                                );
+                            }
+
+                            callee_state.store = callee_state
+                                .store
+                                .clone()
+                                .set(callee_vid, StoreNode::Scalar(value));
+                        }
+                    }
+                }
+
+                if arg_iter.next().is_some() {
+                    panic!("too many arguments supplied to call");
+                }
+
+                // Execute the callee under single-path semantics.
+                let results = func.clone().execute(callee_state);
+                if results.len() != 1 {
+                    panic!("branching in function call is not supported");
+                }
+                let (_ret, mut s_end) = results[0].clone();
+
+                // For methods, propagate the final `self` node back to the
+                // receiver binding in the caller.
+                if let Some((caller_vid, callee_vid)) = self_binding {
+                    let node = s_end.store.get(callee_vid).cloned().unwrap_or_else(|| {
+                        panic!(
+                            "callee `self` binding id {} not found in final store",
+                            callee_vid
+                        )
+                    });
+                    s_end.store = s_end.store.clone().set(caller_vid, node);
+                }
+
+                // A statement-level call does not cause the caller to return.
+                s_end.status = ExecStatus::Step;
+
+                Vector::unit((None, s_end))
+            }
 
             Stmt::Return(e) => {
                 let vals = e.eval(st);
@@ -382,10 +599,13 @@ impl Expr {
             }
 
             Expr::Index(base, idx) => {
-                let idx_val = match *idx {
-                    Expr::Int(k) => k as usize,
-                    _ => panic!("array index must be concrete usize literal"),
-                };
+                let idx_val = eval_index_const_or_err(&state.ctx, Some(&state.store), &idx)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "array index must be a concrete integer literal, const identifier, or scalar store integer: `{:?}`",
+                            idx
+                        )
+                    });
                 let base_node = state
                     .query_expr_node(base.as_ref())
                     .unwrap_or_else(|| panic!("array base not found in store"));
@@ -437,29 +657,122 @@ impl Expr {
                 panic!("Boolean-valued expressions must be checked in Boolean contexts");
             }
 
-            Expr::Call(callee, _args) => {
-                // Function call may have side effects; evaluated sequentially if needed later.
-                let (fid, name_hint) = match *callee {
-                    Expr::Path {
-                        ref_id: Some(fid),
-                        ref segments,
-                    } => (
-                        fid,
-                        segments.last().cloned().unwrap_or_else(|| "call".into()),
-                    ),
-                    _ => panic!("unsupported callee form for call"),
-                };
-                let (_params, ret_opt) = state
+            Expr::Call(callee, args) => {
+                // Calls in expression position are executed symbolically in the
+                // same way as statement-level calls. The callee may be a free
+                // function or a struct method. Side effects on the store are
+                // preserved and the returned symbolic value is propagated.
+
+                // Evaluate arguments sequentially under single-path semantics.
+                let mut s = state;
+                let mut arg_vals = Vec::with_capacity(args.len());
+                for arg in args {
+                    let vals = arg.eval(s);
+                    if vals.len() != 1 {
+                        panic!("branching in call argument is not supported");
+                    }
+                    let (v, s1) = vals[0].clone();
+                    arg_vals.push(v);
+                    s = s1;
+                }
+
+                // Resolve function identifier and, for methods, the receiver.
+                let (fid, receiver_info) = resolve_callee_expr(&s, &callee);
+
+                // Retrieve the callee body from the global context.
+                let func = s
                     .ctx
-                    .fn_sig(fid)
+                    .func_def(fid)
                     .cloned()
-                    .unwrap_or_else(|| panic!("missing function signature for id {}", fid));
-                let sty = if let Some(ret_ty) = ret_opt {
-                    state.type_map(&ret_ty).unwrap_or(SymType::F)
-                } else {
-                    panic!("void-returning function used in expression");
-                };
-                Vector::unit((SymExpr::Var(format!("ret_of_{}", name_hint), sty), state))
+                    .unwrap_or_else(|| panic!("missing function body for id {}", fid));
+
+                // Instantiate a callee state that shares context, store, and
+                // accumulated path condition with the caller.
+                let mut callee_state = s.clone();
+                callee_state.status = ExecStatus::Step;
+
+                // Initialize formal parameters from evaluated arguments. For
+                // methods, the receiver node is aliased through `self`.
+                let mut arg_iter = arg_vals.into_iter();
+                let mut self_binding: Option<(i64, i64)> = None; // (caller_vid, callee_vid)
+
+                for p in &func.params {
+                    match p {
+                        Param::SelfParam { id } => {
+                            let callee_vid =
+                                id.expect("self parameter id must be assigned during resolve");
+
+                            let (caller_vid, struct_id) = receiver_info
+                                .unwrap_or_else(|| panic!("self parameter without receiver"));
+
+                            let recv_node = callee_state
+                                .store
+                                .get(caller_vid)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "receiver variable id {} (struct_id={}) not found in store",
+                                        caller_vid, struct_id
+                                    )
+                                });
+
+                            callee_state.store =
+                                callee_state.store.clone().set(callee_vid, recv_node);
+                            self_binding = Some((caller_vid, callee_vid));
+                        }
+
+                        Param::Typed { id, ty, .. } => {
+                            let callee_vid =
+                                id.expect("parameter id must be assigned during resolve");
+                            let value = arg_iter
+                                .next()
+                                .unwrap_or_else(|| panic!("insufficient arguments in call"));
+
+                            if !ty.is_scalar(&callee_state.ctx) {
+                                panic!(
+                                    "non-scalar parameter types in calls are not yet supported: `{:?}`",
+                                    ty
+                                );
+                            }
+
+                            callee_state.store = callee_state
+                                .store
+                                .clone()
+                                .set(callee_vid, StoreNode::Scalar(value));
+                        }
+                    }
+                }
+
+                if arg_iter.next().is_some() {
+                    panic!("too many arguments supplied to call");
+                }
+
+                // Execute the callee under single-path semantics.
+                let results = func.clone().execute(callee_state);
+                if results.len() != 1 {
+                    panic!("branching in expression-level call is not supported");
+                }
+                let (ret_opt, mut s_end) = results[0].clone();
+
+                // Propagate the final `self` node back to the receiver binding.
+                if let Some((caller_vid, callee_vid)) = self_binding {
+                    let node = s_end.store.get(callee_vid).cloned().unwrap_or_else(|| {
+                        panic!(
+                            "callee `self` binding id {} not found in final store",
+                            callee_vid
+                        )
+                    });
+                    s_end.store = s_end.store.clone().set(caller_vid, node);
+                }
+
+                // Expression position requires a return value.
+                let ret =
+                    ret_opt.unwrap_or_else(|| panic!("void-returning function used in expression"));
+
+                // The caller continues execution after the call.
+                s_end.status = ExecStatus::Step;
+
+                Vector::unit((ret, s_end))
             }
         }
     }
@@ -485,4 +798,83 @@ fn lvalue_to_expr(lv: &LValue) -> Expr {
         }
     }
     e
+}
+/// Resolves a callee expression in either statement or expression position.
+///
+/// Returns the function identifier and, for method calls, the pair
+/// `(receiver_vid, struct_id)` describing the receiver variable and its type.
+fn resolve_callee_expr(state: &SymState, callee: &Expr) -> (i64, Option<(i64, i64)>) {
+    match callee {
+        // Free function: f(...)
+        Expr::Path {
+            ref_id: Some(fid), ..
+        } => {
+            if state.ctx.fn_sig(*fid).is_none() {
+                panic!("callee id {} does not denote a function", fid);
+            }
+            (*fid, None)
+        }
+
+        // Method call: x.m(...). The field may already be resolved to a
+        // function id or still carry only the member name.
+        Expr::Field { base, name, ref_id } => {
+            // Infer the static type of the receiver expression.
+            let base_ty = state.ctx.infer_expr_type(base.as_ref()).unwrap_or_else(|| {
+                panic!("failed to infer static type for method receiver in call")
+            });
+
+            let struct_id = match state.ctx.classify_type(&base_ty) {
+                Ok(PathKind::Struct(sid)) => sid,
+                Ok(PathKind::Builtin) => {
+                    panic!(
+                        "method receiver must be a struct value, got builtin type `{:?}`",
+                        base_ty
+                    )
+                }
+                Err(e) => {
+                    panic!("method receiver has invalid type `{:?}`: {}", base_ty, e)
+                }
+            };
+
+            // Restrict the receiver to be a simple variable path for now.
+            let receiver_vid = match base.as_ref() {
+                Expr::Path {
+                    ref_id: Some(vid), ..
+                } => *vid,
+                _ => panic!("method receiver must be a struct-valued variable path"),
+            };
+
+            // If the field has already been resolved to a function id, prefer it.
+            if let Some(fid) = ref_id {
+                if state.ctx.fn_sig(*fid).is_some() {
+                    return (*fid, Some((receiver_vid, struct_id)));
+                }
+            }
+
+            // Otherwise, look up the method in the struct member table by name.
+            let members = state.ctx.struct_members(struct_id).unwrap_or_else(|| {
+                panic!(
+                    "no member table recorded for struct_id {} when resolving method `{}`",
+                    struct_id, name
+                )
+            });
+
+            let mi = members.get(name).unwrap_or_else(|| {
+                panic!(
+                    "unknown method `{}` on struct_id {} while resolving call",
+                    name, struct_id
+                )
+            });
+
+            let fid = mi
+                .as_func_id()
+                .unwrap_or_else(|| panic!("member `{}` is not a method", name));
+
+            (fid, Some((receiver_vid, struct_id)))
+        }
+
+        _ => {
+            panic!("unsupported callee form for call resolution");
+        }
+    }
 }

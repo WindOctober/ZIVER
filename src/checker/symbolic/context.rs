@@ -36,6 +36,7 @@ pub enum PathKind {
 struct TypeCtx {
     var_types: HashMap<i64, Type>,   // var_id -> declared type
     const_types: HashMap<i64, Type>, // const_id -> type
+    const_ints: HashMap<i64, u64>,
     field_types: HashMap<i64, Type>, // field_id -> type
     fn_sigs: HashMap<i64, (Vec<Type>, Option<Type>)>, // func_id -> (params, ret?)
 }
@@ -46,15 +47,30 @@ pub struct Context {
     next_sym_id: usize,
     funcs: HashMap<i64, Func>, // func_id -> Func
     struct_fields: HashMap<i64, HashMap<String, MemberIndex>>, // struct_id -> { name -> member }
-    types: TypeCtx,
+    struct_names: HashMap<i64, String>, // struct_id -> struct name
     struct_index: HashMap<String, i64>, // struct name -> struct_id
-    func_owner: HashMap<i64, i64>,      // record method ownership (func_id -> struct_id)
+    types: TypeCtx,
+    func_owner: HashMap<i64, i64>, // record method ownership (func_id -> struct_id)
 }
 
 impl Context {
+    /// Returns the canonical name of a struct given its id.
+    fn struct_name(&self, struct_id: i64) -> Option<&String> {
+        self.struct_names.get(&struct_id)
+    }
+
     /// Returns the member map of a struct if available.
     pub fn struct_members(&self, struct_id: i64) -> Option<&HashMap<String, MemberIndex>> {
         self.struct_fields.get(&struct_id)
+    }
+
+    /// Constructs a canonical `Type::Path` for the given struct id.
+    /// The resulting path uses the struct's name as its terminal segment.
+    pub fn struct_type(&self, struct_id: i64) -> Option<Type> {
+        self.struct_name(struct_id).map(|name| Type::Path {
+            segments: vec![name.clone()],
+            ref_id: Some(struct_id),
+        })
     }
 
     /// Resolve field_id by (struct_id, field name).
@@ -62,6 +78,12 @@ impl Context {
         self.struct_members(struct_id)
             .and_then(|m| m.get(name))
             .and_then(|mi| mi.as_field_id())
+    }
+
+    /// Look up the literal integer value of a constant by id, if available.
+    /// Only constants defined as a single `Expr::Int` are recorded here.
+    pub fn const_int(&self, id: i64) -> Option<u64> {
+        self.types.const_ints.get(&id).copied()
     }
 
     /// Query the static type of a non-function id.
@@ -151,6 +173,11 @@ impl Context {
             Expr::Binary { .. } => None,
             Expr::Paren(inner) => self.infer_expr_type(inner),
         }
+    }
+
+    /// Returns the function definition associated with the given identifier.
+    pub fn func_def(&self, id: i64) -> Option<&Func> {
+        self.funcs.get(&id)
     }
 
     /// Query function signature by id.
@@ -245,6 +272,7 @@ pub fn init_context(mods: &mut [Module]) -> Context {
                     *id = Some(nid);
                     scope.insert_global(name.clone(), nid);
                     ctx.struct_index.insert(name.clone(), nid);
+                    ctx.struct_names.insert(nid, name.clone());
                 }
                 Item::Component { id, name, .. } => {
                     let nid = fresh_id(&mut ctx.next_sym_id);
@@ -268,6 +296,13 @@ pub fn init_context(mods: &mut [Module]) -> Context {
                     resolve_expr_ids_flat(value, &scope, &mut ctx);
                     if let Some(cid) = *id {
                         ctx.types.const_types.insert(cid, ty.clone());
+                        if let Expr::Int(k) = value {
+                            ctx.types.const_ints.insert(cid, *k);
+                        } else {
+                            unimplemented!(
+                                "non-literal const initializer: only `Expr::Int` is recorded in const_ints for now"
+                            );
+                        }
                     }
                 }
 
@@ -438,13 +473,26 @@ fn resolve_type_ids_flat(ty: &mut Type, scope: &Scope, ctx: &mut Context) {
 /// Resolve params/locals/body in a fresh local frame; seed TypeCtx.var_types.
 fn resolve_func_flat(fun: &mut Func, ctx: &mut Context, scope: &mut Scope) {
     scope.push();
+    let fid = fun.id.expect("func id must exist");
+    let owner_struct = ctx.method_owner(fid);
 
     for p in &mut fun.params {
         match p {
             Param::SelfParam { id } => {
                 let nid = fresh_id(&mut ctx.next_sym_id);
                 *id = Some(nid);
+
+                // Bind the implicit `self` parameter into the current local scope.
                 scope.insert_local("self".to_string(), nid);
+
+                if let Some(sid) = owner_struct {
+                    // Construct a canonical `Type::Path` pointing to the owning struct.
+                    // The terminal segment reuses the struct's declared name,
+                    let ty = ctx
+                        .struct_type(sid)
+                        .unwrap_or_else(|| panic!("no struct name recorded for struct_id {}", sid));
+                    ctx.types.var_types.insert(nid, ty);
+                }
             }
             Param::Typed { id, name, ty } => {
                 let nid = fresh_id(&mut ctx.next_sym_id);

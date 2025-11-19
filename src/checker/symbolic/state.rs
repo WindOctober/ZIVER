@@ -1,9 +1,10 @@
 use im::HashMap as IMap;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use crate::ast::*;
 use crate::checker::symbolic::context::{Context, PathKind};
-use crate::checker::symbolic::eval_len_const_or_err;
+use crate::checker::symbolic::eval_index_const_or_err;
 use crate::checker::symbolic::expr::{BoolExpr, SymExpr, SymType};
 
 /// Persistent store node for symbolic memory.
@@ -89,18 +90,17 @@ impl StoreNode {
                     return Err(format!("array length mismatch: lhs {:?}, rhs {:?}", ll, rl));
                 }
 
-                // Require that every materialized index on the lhs is also
-                // materialized on the rhs, and recurse on those indices.
-                let mut idxs: Vec<usize> = le.keys().cloned().collect();
-                idxs.sort_unstable();
-
-                for i in idxs {
-                    let lc = le.get(&i).ok_or_else(|| {
-                        format!("lhs is missing index {} during array comparison", i)
-                    })?;
-                    let rc = re.get(&i).ok_or_else(|| {
-                        format!("rhs is missing index {} during array comparison", i)
-                    })?;
+                let lhs_idxs: BTreeSet<_> = le.keys().cloned().collect();
+                let rhs_idxs: BTreeSet<_> = re.keys().cloned().collect();
+                if lhs_idxs != rhs_idxs {
+                    return Err(format!(
+                        "array index set mismatch: lhs {:?}, rhs {:?}",
+                        lhs_idxs, rhs_idxs
+                    ));
+                }
+                for i in lhs_idxs {
+                    let lc = le.get(&i).unwrap();
+                    let rc = re.get(&i).unwrap();
                     lc.collect_scalar_pairs_with(rc, out)?;
                 }
                 Ok(())
@@ -234,10 +234,12 @@ impl SymState {
                 }
             }
             Expr::Index(base, idx) => {
-                let idx_val = match **idx {
-                    Expr::Int(k) => k as usize,
-                    _ => unimplemented!("array index must be concrete literal"),
-                };
+                let idx_val = eval_index_const_or_err(&self.ctx, Some(&self.store), idx)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "array index must be a concrete integer literal or constant identifier"
+                        )
+                    });
                 let parent = self.query_expr_node(base.as_ref())?;
                 match parent {
                     StoreNode::Array { elems, .. } => elems.get(&idx_val),
@@ -382,7 +384,7 @@ impl SymState {
 
             Type::Array(inner, len_expr) => {
                 // Length must be constant at runtime for indexing; unknown is allowed at allocation.
-                let len: Option<usize> = eval_len_const_or_err(len_expr);
+                let len: Option<usize> = eval_index_const_or_err(&self.ctx, None, len_expr);
                 let _ = &**inner; // elements are lazily materialized upon indexed writes/reads
                 StoreNode::array(len)
             }

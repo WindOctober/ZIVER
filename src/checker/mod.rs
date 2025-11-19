@@ -4,7 +4,7 @@ pub(crate) mod symbolic;
 use std::rc::Rc;
 
 use crate::{
-    ast::File,
+    ast::{File, helpers::build_param_expr_map},
     checker::symbolic::{
         context::Context,
         execute::SymbolicExecutor,
@@ -126,12 +126,89 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, _config: SetConfig) -> R
             ));
         }
 
+        let lhs_params = build_param_expr_map(lhs_func);
+        let rhs_params = build_param_expr_map(rhs_func);
+
+        let lhs_root_name = lhs_root_path
+            .first()
+            .expect("lhs root path must contain at least one segment");
+        let rhs_root_name = rhs_root_path
+            .first()
+            .expect("rhs root path must contain at least one segment");
+
+        // Collect scalar pairs for matched non-root input parameters.
+        let mut input_pairs: Vec<(SymExpr, SymExpr)> = Vec::new();
+
+        // Left-to-right: every non-root lhs parameter must either:
+        //   - have a counterpart with the same name on the rhs, or
+        //   - be exactly the rhs root parameter (which we skip).
+        for (name, lhs_param_expr) in lhs_params.iter() {
+            // Skip the query root parameter on lhs (e.g., `self`).
+            if name == lhs_root_name {
+                continue;
+            }
+
+            // Try to find a parameter with the same name on rhs.
+            if let Some(rhs_param_expr) = rhs_params.get(name) {
+                let lhs_node = lhs_final
+                    .query_expr_node(lhs_param_expr)
+                    .ok_or_else(|| {
+                        format!(
+                            "Component `{}`: failed to locate lhs input parameter `{}` in the final store",
+                            comp_name, name
+                        )
+                    })?;
+                let rhs_node = rhs_final
+                    .query_expr_node(rhs_param_expr)
+                    .ok_or_else(|| {
+                        format!(
+                            "Component `{}`: failed to locate rhs input parameter `{}` in the final store",
+                            comp_name, name
+                        )
+                    })?;
+
+                lhs_node.collect_scalar_pairs_with(rhs_node, &mut input_pairs)?;
+            } else if name != rhs_root_name {
+                // A non-root parameter exists only on lhs but not on rhs: structural mismatch.
+                return Err(format!(
+                    "Component `{}`: parameter `{}` present in `{}` but missing in `{}`",
+                    comp_name, name, lhs_func.name, rhs_func.name
+                ));
+            }
+        }
+
+        // Right-to-left: check rhs for extra non-root parameters not present on lhs.
+        for (name, _) in rhs_params.iter() {
+            if name == rhs_root_name {
+                continue; // skip rhs query root (e.g., `cols`)
+            }
+            if !lhs_params.contains_key(name) && name != lhs_root_name {
+                return Err(format!(
+                    "Component `{}`: parameter `{}` present in `{}` but missing in `{}`",
+                    comp_name, name, rhs_func.name, lhs_func.name
+                ));
+            }
+        }
+
+        // Turn all collected input scalar pairs into equality atoms and conjoin them.
+        let eq_inputs = if input_pairs.is_empty() {
+            // No shared inputs beyond query roots; treat as trivially equal.
+            BoolExpr::Bool(true)
+        } else {
+            let mut atoms = Vec::with_capacity(input_pairs.len());
+            for (a, b) in input_pairs {
+                atoms.push(BoolExpr::Eq(a, b));
+            }
+            BoolExpr::and(atoms)
+        };
+
+        // --------------------------------------------------------------------
+        // Path conditions + output difference as before.
+        // --------------------------------------------------------------------
+
         // Construct the overall path conditions for the two executions.
         let pc_lhs = lhs_final.pc();
         let pc_rhs = rhs_final.pc();
-
-        // TODO: construct input equivalence constraints.
-        let eq_inputs = BoolExpr::Bool(true);
 
         // Encode the disjunction that at least one output scalar pair differs.
         let mut diff_atoms = Vec::new();

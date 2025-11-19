@@ -1,6 +1,40 @@
+use std::collections::HashMap;
+
 use crate::checker::symbolic::context::{Context, PathKind};
 
 use super::*;
+
+/// Build a name → parameter-binding expression map for a function.
+/// Each entry is an `Expr::Path` that refers to the parameter binding inside `func`
+/// (with a resolved `ref_id`).
+pub fn build_param_expr_map(func: &Func) -> HashMap<String, Expr> {
+    let mut map = HashMap::new();
+    for p in &func.params {
+        match p {
+            Param::SelfParam { id } => {
+                let vid = id.expect("self parameter id must be assigned during resolve");
+                map.insert(
+                    "self".to_string(),
+                    Expr::Path {
+                        segments: vec!["self".to_string()],
+                        ref_id: Some(vid),
+                    },
+                );
+            }
+            Param::Typed { id, name, .. } => {
+                let vid = id.expect("parameter id must be assigned during resolve");
+                map.insert(
+                    name.clone(),
+                    Expr::Path {
+                        segments: vec![name.clone()],
+                        ref_id: Some(vid),
+                    },
+                );
+            }
+        }
+    }
+    map
+}
 
 impl File {
     /// Iterate all `Component`s with their (optional) IDs.
