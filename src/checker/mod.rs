@@ -5,11 +5,14 @@ use std::rc::Rc;
 
 use crate::{
     ast::{File, helpers::build_param_expr_map},
-    checker::symbolic::{
-        context::Context,
-        execute::SymbolicExecutor,
-        expr::{BoolExpr, SymExpr},
-        state::SymState,
+    checker::{
+        solver::check_with_z3,
+        symbolic::{
+            context::Context,
+            execute::SymbolicExecutor,
+            expr::{BoolExpr, SymExpr},
+            state::SymState,
+        },
     },
     utils::SetConfig,
 };
@@ -213,20 +216,43 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, _config: SetConfig) -> R
         // Encode the disjunction that at least one output scalar pair differs.
         let mut diff_atoms = Vec::new();
         for (a, b) in out_pairs {
-            // Here we assume that BoolExpr can express disequality on SymExpr.
+            // Disequality on scalar outputs becomes a Boolean atom.
             diff_atoms.push(BoolExpr::Ne(a, b));
         }
         let outputs_diff = BoolExpr::or(diff_atoms);
 
-        // Final formula: both path conditions hold, all inputs coincide,
+        // Final formula: both path conditions hold, all shared inputs coincide,
         // and at least one observed output scalar differs.
+        //
+        // If this formula is satisfiable, then there exists a concrete model
+        // witnessing a behavioral difference between the two functions.
+        // If it is unsatisfiable, the two functions are equivalent under the
+        // current single-path symbolic semantics.
         let phi = BoolExpr::and(vec![pc_lhs, pc_rhs, eq_inputs, outputs_diff]);
 
-        // TODO: invoke the SMT solver on `phi`.
-        println!(
-            "Component `{}`: generated SMT formula for equivalence checking:\n{}",
-            comp_name, phi
-        );
+        match check_with_z3(&phi) {
+            Ok(false) => {
+                // UNSAT: no counterexample exists for this component.
+                println!(
+                    "Component `{}`: SMT check reports UNSAT; equivalence holds under the encoded semantics.",
+                    comp_name
+                );
+            }
+            Ok(true) => {
+                // SAT: a counterexample exists, so equivalence fails.
+                return Err(format!(
+                    "Component `{}`: SMT check reports SAT; a counterexample to equivalence exists.",
+                    comp_name
+                ));
+            }
+            Err(e) => {
+                // Unknown or failure is treated as a hard error for now.
+                return Err(format!(
+                    "Component `{}`: SMT solver failed or returned `unknown`: {}",
+                    comp_name, e
+                ));
+            }
+        }
     }
 
     Ok(())

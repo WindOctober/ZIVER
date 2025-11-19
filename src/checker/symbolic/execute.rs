@@ -287,6 +287,73 @@ impl SymbolicExecutor for Stmt {
                 s1.store = write_to_lvalue(&s1.ctx, s1.store.clone(), &target, newv);
                 Vector::unit((None, s1))
             }
+            Stmt::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                // Evaluate the Boolean condition under sequential semantics.
+                let (bcond, s_after_cond) = eval_bool_expr(cond, st);
+
+                // Execute a straight-line block while preserving the multi-path
+                // propagation discipline used in function-level symbolic execution.
+                fn exec_block(
+                    mut live: Vector<SymState>,
+                    block: &Vec<Stmt>,
+                ) -> Vector<(Option<SymExpr>, SymState)> {
+                    let mut out: Vector<(Option<SymExpr>, SymState)> = Vector::new();
+
+                    for stmt in block.clone() {
+                        let mut next_live: Vector<SymState> = Vector::new();
+
+                        for s in live.into_iter() {
+                            if !s.is_active() {
+                                // Inactive states bypass the computation and are forwarded unchanged.
+                                next_live.push_back(s);
+                                continue;
+                            }
+
+                            let res = stmt.clone().execute(s);
+                            if res.is_empty() {
+                                panic!("block statement produced no successor states");
+                            }
+
+                            for (ret, s_next) in res {
+                                if s_next.is_terminal() {
+                                    // Terminal states (return/break) are emitted directly to the caller.
+                                    out.push_back((ret, s_next));
+                                } else {
+                                    next_live.push_back(s_next);
+                                }
+                            }
+                        }
+
+                        live = next_live;
+                        if live.is_empty() {
+                            break;
+                        }
+                    }
+
+                    // Remaining non-terminal states are returned with an empty return value.
+                    for s in live {
+                        out.push_back((None, s));
+                    }
+
+                    out
+                }
+
+                // Construct the symbolic states for the two branches with
+                // their respective path conditions.
+                let then_start = s_after_cond.clone().with_pc(bcond.clone());
+                let else_start = s_after_cond.with_pc(bcond.not());
+
+                let mut res_then = exec_block(Vector::unit(then_start), &then_branch);
+                let res_else = exec_block(Vector::unit(else_start), &else_branch);
+
+                // Combine all successors from both branches.
+                res_then.append(res_else);
+                res_then
+            }
 
             Stmt::For {
                 id,

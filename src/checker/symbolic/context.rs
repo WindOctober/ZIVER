@@ -547,6 +547,25 @@ fn resolve_stmt_ids_flat(s: &mut Stmt, ctx: &mut Context, scope: &mut Scope) {
             }
             scope.pop();
         }
+        Stmt::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            resolve_expr_ids_flat(cond, scope, ctx);
+
+            scope.push();
+            for st in then_branch.iter_mut() {
+                resolve_stmt_ids_flat(st, ctx, scope);
+            }
+            scope.pop();
+
+            scope.push();
+            for st in else_branch.iter_mut() {
+                resolve_stmt_ids_flat(st, ctx, scope);
+            }
+            scope.pop();
+        }
         Stmt::AssertBool(e) => resolve_expr_ids_flat(e, scope, ctx),
         Stmt::AssertEq(a, b) => {
             resolve_expr_ids_flat(a, scope, ctx);

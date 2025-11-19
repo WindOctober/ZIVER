@@ -127,6 +127,11 @@ pub enum Stmt {
         end: Expr,
         body: Vec<Stmt>,
     },
+    If {
+        cond: Expr,
+        then_branch: Vec<Stmt>,
+        else_branch: Vec<Stmt>,
+    },
     AssertBool(Expr),
     AssertEq(Expr, Expr),
     Call {

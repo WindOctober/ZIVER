@@ -51,7 +51,7 @@ param       = { "self" | ident ~ ":" ~ type_ref }
 
 // === Blocks and statements ===
 block     = { "{" ~ stmt* ~ "}" }
-stmt      = _{ var_decl | and_assign | assign | for_loop | assert_stmt | call_stmt | return_stmt }
+stmt      = _{ var_decl | and_assign | assign | for_loop  | if_stmt | assert_stmt | call_stmt | return_stmt }
 
 var_decl  = { type_ref ~ ident ~ "=" ~ expr ~ ";" }
 assign    = { lvalue ~ "="  ~ expr ~ ";" }
@@ -60,6 +60,7 @@ and_assign = { lvalue ~ "&=" ~ expr ~ ";" }
 lvalue     = { path ~ ( field_tail | index_tail )* }
 range    = { expr ~ ".." ~ expr }
 for_loop = { "for" ~ ident ~ "in" ~ range ~ block }
+if_stmt  = { "if" ~ expr ~ block ~ ( "else" ~ block )? }
 
 assert_stmt = {
   (

@@ -323,6 +323,7 @@ fn parse_block(p: Pair<Rule>) -> Result<Vec<Stmt>> {
                     body,
                 }
             }
+            Rule::if_stmt => parse_if_stmt(s)?,
             Rule::assert_stmt => {
                 // assert_bool(expr);  |  assert_eq(expr, expr);
                 // We inspect the number of `expr` children to disambiguate.
@@ -364,6 +365,37 @@ fn parse_block(p: Pair<Rule>) -> Result<Vec<Stmt>> {
         });
     }
     Ok(out)
+}
+
+/// Parse an if-then-else statement:
+/// if <cond_expr> <then_block> (else <else_block>)?
+fn parse_if_stmt(p: Pair<Rule>) -> Result<Stmt> {
+    let mut it = p.into_inner();
+
+    // First child: condition expression.
+    let cond_pair = it
+        .next()
+        .ok_or_else(|| anyhow!("missing condition in if-statement"))?;
+    let cond = parse_expr(cond_pair)?;
+
+    // Second child: then-block.
+    let then_block_pair = it
+        .next()
+        .ok_or_else(|| anyhow!("missing then-block in if-statement"))?;
+    let then_block = parse_block(then_block_pair)?;
+
+    // Optional third child: else-block.
+    let else_block = if let Some(else_block_pair) = it.next() {
+        parse_block(else_block_pair)?
+    } else {
+        Vec::new()
+    };
+
+    Ok(Stmt::If {
+        cond,
+        then_branch: then_block,
+        else_branch: else_block,
+    })
 }
 
 /// Parse a call statement `lvalue call_tail`.
