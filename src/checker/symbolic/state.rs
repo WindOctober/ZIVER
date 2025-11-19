@@ -291,7 +291,7 @@ impl SymState {
         }
     }
 
-    fn fresh_sym(&mut self, hint: &str, ty: SymType) -> SymExpr {
+    pub fn fresh_sym(&mut self, hint: &str, ty: SymType) -> SymExpr {
         let id = self.fresh;
         self.fresh += 1;
         SymExpr::Var(format!("{}_{}", hint, id), ty)

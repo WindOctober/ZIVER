@@ -54,6 +54,11 @@ pub struct Context {
 }
 
 impl Context {
+    /// Returns the struct id associated with a component or struct name.
+    pub fn struct_id_by_name(&self, name: &str) -> Option<i64> {
+        self.struct_index.get(name).copied()
+    }
+
     /// Returns the canonical name of a struct given its id.
     fn struct_name(&self, struct_id: i64) -> Option<&String> {
         self.struct_names.get(&struct_id)

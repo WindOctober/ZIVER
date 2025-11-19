@@ -222,9 +222,34 @@ impl SymbolicExecutor for Stmt {
             }
 
             Stmt::AssertBool(e) => {
-                let (cond, s1) = eval_bool_expr(e, st);
-                let s2 = s1.with_pc(cond);
-                Vector::unit((None, s2))
+                // Boolean expressions: literal or equality.
+                if matches!(&e, Expr::Bool(_) | Expr::Binary { op: BinOp::Eq, .. }) {
+                    let (cond, s1) = eval_bool_expr(e, st);
+                    let s2 = s1.with_pc(cond);
+                    return Vector::unit((None, s2));
+                }
+
+                // Lvalue-like expressions: constrain value to be 0 or 1.
+                match e {
+                    Expr::Path { .. } | Expr::Field { .. } | Expr::Index(..) => {
+                        let vals = e.eval(st);
+                        if vals.len() != 1 {
+                            panic!("branching in AssertBool(lvalue) is unsupported");
+                        }
+                        let (v, s1) = vals[0].clone();
+                        let zero = SymExpr::Int(0);
+                        let one = SymExpr::Int(1);
+                        let guard = BoolExpr::or(vec![v.clone().eq_to(zero), v.eq_to(one)]);
+                        let s2 = s1.with_pc(guard);
+                        Vector::unit((None, s2))
+                    }
+                    other => {
+                        panic!(
+                            "unsupported Boolean expression in AssertBool: `{:?}`",
+                            other
+                        );
+                    }
+                }
             }
 
             Stmt::VarDecl { id, ty, init, .. } => {
@@ -458,11 +483,7 @@ impl SymbolicExecutor for Stmt {
             }
 
             Stmt::Call { callee, args } => {
-                // Statement-level calls are modeled as concrete invocations of
-                // the target function or method. The callee may be a free
-                // function or a struct method `x.m(...)`.
-
-                // Evaluate arguments sequentially under single-path semantics.
+                // Evaluate arguments sequentially.
                 let mut s = st;
                 let mut arg_vals = Vec::with_capacity(args.len());
                 for arg in args {
@@ -475,24 +496,44 @@ impl SymbolicExecutor for Stmt {
                     s = s1;
                 }
 
-                // Normalize the callee to an expression and resolve the target.
+                // Normalize callee.
                 let callee_expr = lvalue_to_expr(&callee);
+
+                // Builtin scalar methods like `a.inverse()`.
+                if let Expr::Field { base, name, .. } = &callee_expr {
+                    if let Some(base_ty) = s.ctx.infer_expr_type(base.as_ref()) {
+                        if let Ok(PathKind::Builtin) = s.ctx.classify_type(&base_ty) {
+                            let res = eval_builtin_method_call(
+                                s,
+                                *base.clone(),
+                                &base_ty,
+                                name.as_str(),
+                                arg_vals,
+                            );
+                            if res.len() != 1 {
+                                panic!("branching in builtin statement-level call is unsupported");
+                            }
+                            let (_v, s1) = res[0].clone();
+                            // Discard return value, keep updated state and path condition.
+                            return Vector::unit((None, s1));
+                        }
+                    }
+                }
+
+                // Regular function or struct method.
                 let (fid, receiver_info) = resolve_callee_expr(&s, &callee_expr);
 
-                // Retrieve the callee body from the global context.
                 let func = s
                     .ctx
                     .func_def(fid)
                     .cloned()
                     .unwrap_or_else(|| panic!("missing function body for id {}", fid));
 
-                // Instantiate a callee state that shares context, store, and
-                // accumulated path condition with the caller.
+                // Callee state shares context, store, and path condition.
                 let mut callee_state = s.clone();
                 callee_state.status = ExecStatus::Step;
 
-                // Initialize formal parameters from evaluated arguments.
-                // For methods, the receiver node is aliased through `self`.
+                // Initialize parameters.
                 let mut arg_iter = arg_vals.into_iter();
                 let mut self_binding: Option<(i64, i64)> = None; // (caller_vid, callee_vid)
 
@@ -530,7 +571,7 @@ impl SymbolicExecutor for Stmt {
 
                             if !ty.is_scalar(&callee_state.ctx) {
                                 panic!(
-                                    "non-scalar parameter types in calls are not yet supported: `{:?}`",
+                                    "non-scalar parameter types in calls are not supported: `{:?}`",
                                     ty
                                 );
                             }
@@ -547,15 +588,14 @@ impl SymbolicExecutor for Stmt {
                     panic!("too many arguments supplied to call");
                 }
 
-                // Execute the callee under single-path semantics.
+                // Execute callee.
                 let results = func.clone().execute(callee_state);
                 if results.len() != 1 {
                     panic!("branching in function call is not supported");
                 }
                 let (_ret, mut s_end) = results[0].clone();
 
-                // For methods, propagate the final `self` node back to the
-                // receiver binding in the caller.
+                // Propagate `self` back to caller if needed.
                 if let Some((caller_vid, callee_vid)) = self_binding {
                     let node = s_end.store.get(callee_vid).cloned().unwrap_or_else(|| {
                         panic!(
@@ -566,9 +606,7 @@ impl SymbolicExecutor for Stmt {
                     s_end.store = s_end.store.clone().set(caller_vid, node);
                 }
 
-                // A statement-level call does not cause the caller to return.
                 s_end.status = ExecStatus::Step;
-
                 Vector::unit((None, s_end))
             }
 
@@ -725,12 +763,7 @@ impl Expr {
             }
 
             Expr::Call(callee, args) => {
-                // Calls in expression position are executed symbolically in the
-                // same way as statement-level calls. The callee may be a free
-                // function or a struct method. Side effects on the store are
-                // preserved and the returned symbolic value is propagated.
-
-                // Evaluate arguments sequentially under single-path semantics.
+                // Evaluate arguments sequentially.
                 let mut s = state;
                 let mut arg_vals = Vec::with_capacity(args.len());
                 for arg in args {
@@ -743,23 +776,33 @@ impl Expr {
                     s = s1;
                 }
 
-                // Resolve function identifier and, for methods, the receiver.
+                // Builtin scalar methods like `field.inverse()`.
+                if let Expr::Field { base, name, .. } = callee.as_ref() {
+                    if let Some(base_ty) = s.ctx.infer_expr_type(base.as_ref()) {
+                        if let Ok(PathKind::Builtin) = s.ctx.classify_type(&base_ty) {
+                            return eval_builtin_method_call(
+                                s,
+                                *base.clone(),
+                                &base_ty,
+                                name.as_str(),
+                                arg_vals,
+                            );
+                        }
+                    }
+                }
+
+                // Regular functions and struct methods.
                 let (fid, receiver_info) = resolve_callee_expr(&s, &callee);
 
-                // Retrieve the callee body from the global context.
                 let func = s
                     .ctx
                     .func_def(fid)
                     .cloned()
                     .unwrap_or_else(|| panic!("missing function body for id {}", fid));
 
-                // Instantiate a callee state that shares context, store, and
-                // accumulated path condition with the caller.
                 let mut callee_state = s.clone();
                 callee_state.status = ExecStatus::Step;
 
-                // Initialize formal parameters from evaluated arguments. For
-                // methods, the receiver node is aliased through `self`.
                 let mut arg_iter = arg_vals.into_iter();
                 let mut self_binding: Option<(i64, i64)> = None; // (caller_vid, callee_vid)
 
@@ -814,14 +857,12 @@ impl Expr {
                     panic!("too many arguments supplied to call");
                 }
 
-                // Execute the callee under single-path semantics.
                 let results = func.clone().execute(callee_state);
                 if results.len() != 1 {
                     panic!("branching in expression-level call is not supported");
                 }
                 let (ret_opt, mut s_end) = results[0].clone();
 
-                // Propagate the final `self` node back to the receiver binding.
                 if let Some((caller_vid, callee_vid)) = self_binding {
                     let node = s_end.store.get(callee_vid).cloned().unwrap_or_else(|| {
                         panic!(
@@ -832,11 +873,9 @@ impl Expr {
                     s_end.store = s_end.store.clone().set(caller_vid, node);
                 }
 
-                // Expression position requires a return value.
                 let ret =
                     ret_opt.unwrap_or_else(|| panic!("void-returning function used in expression"));
 
-                // The caller continues execution after the call.
                 s_end.status = ExecStatus::Step;
 
                 Vector::unit((ret, s_end))
@@ -866,6 +905,7 @@ fn lvalue_to_expr(lv: &LValue) -> Expr {
     }
     e
 }
+
 /// Resolves a callee expression in either statement or expression position.
 ///
 /// Returns the function identifier and, for method calls, the pair
@@ -942,6 +982,60 @@ fn resolve_callee_expr(state: &SymState, callee: &Expr) -> (i64, Option<(i64, i6
 
         _ => {
             panic!("unsupported callee form for call resolution");
+        }
+    }
+}
+
+/// Evaluate a builtin scalar method like `field.inverse()`.
+fn eval_builtin_method_call(
+    state: SymState,
+    base_expr: Expr,
+    base_ty: &Type,
+    method_name: &str,
+    arg_vals: Vec<SymExpr>,
+) -> Vector<(SymExpr, SymState)> {
+    let vals = base_expr.eval(state);
+    if vals.len() != 1 {
+        panic!(
+            "branching in builtin method receiver `{}` is not supported",
+            method_name
+        );
+    }
+    let (recv, mut s1) = vals[0].clone();
+
+    if !arg_vals.is_empty() {
+        panic!(
+            "builtin method `{}` on type `{:?}` does not accept arguments",
+            method_name, base_ty
+        );
+    }
+
+    let sty = s1
+        .type_map(base_ty)
+        .unwrap_or_else(|e| panic!("builtin method type mapping failed: {e}"));
+
+    match (sty, method_name) {
+        // field.inverse() : field
+        (SymType::F, "inverse") => {
+            let inv = s1.fresh_sym("inverse", SymType::F);
+
+            let zero = SymExpr::Int(0);
+            let one = SymExpr::Int(1);
+
+            // (a == 0) OR (a * inv == 1)
+            let recv_eq_zero = recv.clone().eq_to(zero);
+            let recv_times_inv_eq_one = (recv.clone() * inv.clone()).eq_to(one);
+            let guard = BoolExpr::or(vec![recv_eq_zero, recv_times_inv_eq_one]);
+
+            s1 = s1.with_pc(guard);
+            Vector::unit((inv, s1))
+        }
+
+        (sty, name) => {
+            panic!(
+                "unsupported builtin method `{}` for scalar sort `{:?}`",
+                name, sty
+            );
         }
     }
 }
