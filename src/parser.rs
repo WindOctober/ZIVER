@@ -497,24 +497,35 @@ fn parse_lvalue(p: Pair<Rule>) -> Result<LValue> {
     })
 }
 
-/// Parse an expression in the simplified left-associative form:
-/// `expr := postfix ( op ~ postfix )*`
-/// The operator `op` is a visible rule (non-silent) to ensure it appears in the parse tree.
+/// Parse an expression with precedence:
+/// `*` > `+`/`-` > `&` > `==`, all left-associative.
 fn parse_expr(p: Pair<Rule>) -> Result<Expr> {
     match p.as_rule() {
         Rule::expr => {
             let mut it = p.into_inner();
-            let mut left = parse_postfix(it.next().ok_or_else(|| anyhow!("expr missing lhs"))?)?;
 
+            // First operand must be a postfix expression.
+            let first_postfix = it.next().ok_or_else(|| anyhow!("expr missing lhs"))?;
+            if first_postfix.as_rule() != Rule::postfix {
+                return Err(anyhow!(
+                    "expected postfix as lhs in expr, found {:?}",
+                    first_postfix.as_rule()
+                ));
+            }
+            let mut values: Vec<Expr> = vec![parse_postfix(first_postfix)?];
+            let mut ops: Vec<BinOp> = Vec::new();
+
+            // Then: (op, postfix)*.
             while let Some(op_pair) = it.next() {
                 if op_pair.as_rule() != Rule::op {
                     return Err(anyhow!(
-                        "expected operator, found {:?} `{}`",
+                        "expected operator in expr, found {:?} `{}`",
                         op_pair.as_rule(),
                         op_pair.as_str()
                     ));
                 }
-                let op = match op_pair.as_str() {
+
+                let bin_op = match op_pair.as_str() {
                     "==" => BinOp::Eq,
                     "*" => BinOp::Mul,
                     "+" => BinOp::Add,
@@ -522,6 +533,7 @@ fn parse_expr(p: Pair<Rule>) -> Result<Expr> {
                     "&" => BinOp::BitAnd,
                     other => return Err(anyhow!("unknown operator: {}", other)),
                 };
+                ops.push(bin_op);
 
                 let rhs_postfix = it.next().ok_or_else(|| {
                     anyhow!("expr missing rhs after operator `{}`", op_pair.as_str())
@@ -533,21 +545,29 @@ fn parse_expr(p: Pair<Rule>) -> Result<Expr> {
                         rhs_postfix.as_rule()
                     ));
                 }
-                let rhs = parse_postfix(rhs_postfix)?;
-                left = Expr::Binary {
-                    op,
-                    lhs: Box::new(left),
-                    rhs: Box::new(rhs),
-                };
+                values.push(parse_postfix(rhs_postfix)?);
             }
 
-            Ok(left)
+            // No operators: degenerate expression with a single operand.
+            if ops.is_empty() {
+                debug_assert_eq!(values.len(), 1);
+                Ok(values.pop().unwrap())
+            } else {
+                Ok(build_bin_expr_with_precedence(values, ops))
+            }
         }
+
+        // Allow re-entry from other rules if needed.
         Rule::postfix => parse_postfix(p),
         Rule::primary => parse_primary(p),
-        other => Err(anyhow!("unexpected rule in parse_expr: {:?}", other)),
+
+        other => Err(anyhow!(
+            "unexpected rule in parse_expr dispatch: {:?}",
+            other
+        )),
     }
 }
+
 /// Parse a primary expression: integer, boolean, path, or parenthesized expression.
 fn parse_primary(p: Pair<Rule>) -> Result<Expr> {
     let inner = p.into_inner().next().unwrap();
@@ -619,4 +639,66 @@ fn parse_postfix(p: Pair<Rule>) -> Result<Expr> {
     }
 
     Ok(e)
+}
+
+/// Precedence table for binary operators.
+/// Larger value means higher precedence.
+fn binop_precedence(op: &BinOp) -> u8 {
+    match op {
+        BinOp::Mul => 3,
+        BinOp::Add | BinOp::Sub => 2,
+        BinOp::BitAnd => 1,
+        BinOp::Eq => 0,
+    }
+}
+
+/// Build a left-associative binary expression tree with precedence.
+/// `values` has length `n`, `ops` has length `n-1`.
+fn build_bin_expr_with_precedence(mut values: Vec<Expr>, mut ops: Vec<BinOp>) -> Expr {
+    assert!(!values.is_empty());
+    assert!(values.len() == ops.len() + 1);
+
+    let mut val_stack: Vec<Expr> = Vec::new();
+    let mut op_stack: Vec<BinOp> = Vec::new();
+
+    // Seed with first value.
+    val_stack.push(values.remove(0));
+
+    while !values.is_empty() {
+        let v = values.remove(0);
+        let op = ops.remove(0);
+
+        // Reduce while the top operator has higher or equal precedence.
+        while let Some(top) = op_stack.last().cloned() {
+            if binop_precedence(&top) >= binop_precedence(&op) {
+                op_stack.pop();
+                let rhs = val_stack.pop().expect("rhs missing in value stack");
+                let lhs = val_stack.pop().expect("lhs missing in value stack");
+                val_stack.push(Expr::Binary {
+                    op: top,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                });
+            } else {
+                break;
+            }
+        }
+
+        op_stack.push(op);
+        val_stack.push(v);
+    }
+
+    // Flush remaining operators.
+    while let Some(op) = op_stack.pop() {
+        let rhs = val_stack.pop().expect("rhs missing in final reduction");
+        let lhs = val_stack.pop().expect("lhs missing in final reduction");
+        val_stack.push(Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        });
+    }
+
+    assert_eq!(val_stack.len(), 1);
+    val_stack.pop().unwrap()
 }

@@ -250,6 +250,7 @@ impl BoolExpr {
             _ => BoolExpr::And(flat),
         }
     }
+
     /// Builds a disjunction (variadic).
     pub fn or(mut xs: Vec<BoolExpr>) -> Self {
         let mut flat = Vec::new();

@@ -266,7 +266,7 @@ pub fn init_context(mods: &mut [Module]) -> Context {
     for m in mods.iter_mut() {
         for item in m.file.items.iter_mut() {
             match item {
-                Item::Import { .. } => {}
+                Item::Import { .. } | Item::Component { .. } => {}
                 Item::Const { id, name, .. } => {
                     let nid = fresh_id(&mut ctx.next_sym_id);
                     *id = Some(nid);
@@ -278,11 +278,6 @@ pub fn init_context(mods: &mut [Module]) -> Context {
                     scope.insert_global(name.clone(), nid);
                     ctx.struct_index.insert(name.clone(), nid);
                     ctx.struct_names.insert(nid, name.clone());
-                }
-                Item::Component { id, name, .. } => {
-                    let nid = fresh_id(&mut ctx.next_sym_id);
-                    *id = Some(nid);
-                    scope.insert_global(name.clone(), nid);
                 }
             }
         }

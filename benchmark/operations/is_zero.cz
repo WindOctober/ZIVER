@@ -17,13 +17,13 @@ Component IsZeroOperation {
   }
 
   Constraint eval(self, a: field,cols:IsZeroOperation, is_real: field) {
-    assert_bool(self.result);
+    assert_bool(cols.result);
 
     field one = 1;
-    field is_zero = one - self.inverse * a;
-    assert_eq(is_zero , self.result);
+    field is_zero = one - cols.inverse * a;
+    assert_eq(is_zero , cols.result);
 
-    assert_eq(self.result * a, 0);
+    assert_eq(cols.result * a, 0);
   }
   Query(populate,self;eval,cols)
 }

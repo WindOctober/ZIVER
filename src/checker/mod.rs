@@ -108,140 +108,148 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, _config: SetConfig) -> R
         let lhs_terms = lhs_func.clone().execute(SymState::new(Rc::clone(&ctx)));
         let rhs_terms = rhs_func.clone().execute(SymState::new(Rc::clone(&ctx)));
 
-        if lhs_terms.len() != 1 || rhs_terms.len() != 1 {
+        if lhs_terms.is_empty() || rhs_terms.is_empty() {
             return Err(format!(
-                "Component `{}`: branching executions are not supported (lhs = {}, rhs = {})",
+                "Component `{}`: no terminal paths produced on LHS ({}) or RHS ({})",
                 comp_name,
                 lhs_terms.len(),
                 rhs_terms.len()
             ));
         }
 
-        let (_lhs_ret, lhs_final) = lhs_terms[0].clone();
-        let (_rhs_ret, rhs_final) = rhs_terms[0].clone();
+        // For every pair of terminal paths (lhs_i, rhs_j), we check that
+        // there is no model with equal inputs and differing outputs
+        // under the conjunction of their path conditions.
+        for (li, (_lhs_ret, lhs_final)) in lhs_terms.iter().enumerate() {
+            for (rj, (_rhs_ret, rhs_final)) in rhs_terms.iter().enumerate() {
+                // Locate the two root struct instances in the final stores.
+                let lhs_root_node = lhs_final.query_expr_node(&lhs_root_expr).ok_or_else(|| {
+                    format!(
+                        "Component `{}`: LHS root `{:?}` not found in final store for path {}",
+                        comp_name, lhs_root_path, li
+                    )
+                })?;
+                let rhs_root_node = rhs_final.query_expr_node(&rhs_root_expr).ok_or_else(|| {
+                    format!(
+                        "Component `{}`: RHS root `{:?}` not found in final store for path {}",
+                        comp_name, rhs_root_path, rj
+                    )
+                })?;
 
-        // Locate the two root struct instances in the final stores.
-        let lhs_root_node = lhs_final.query_expr_node(&lhs_root_expr).ok_or_else(|| {
-            format!(
-                "Component `{}`: LHS root `{:?}` not found in final store",
-                comp_name, lhs_root_path
-            )
-        })?;
-        let rhs_root_node = rhs_final.query_expr_node(&rhs_root_expr).ok_or_else(|| {
-            format!(
-                "Component `{}`: RHS root `{:?}` not found in final store",
-                comp_name, rhs_root_path
-            )
-        })?;
+                let (lhs_fields, rhs_fields) = match (lhs_root_node, rhs_root_node) {
+                    (StoreNode::Struct { fields: lf }, StoreNode::Struct { fields: rf }) => {
+                        (lf, rf)
+                    }
+                    _ => {
+                        return Err(format!(
+                            "Component `{}`: Query roots are expected to be struct values (lhs path {}, rhs path {})",
+                            comp_name, li, rj
+                        ));
+                    }
+                };
 
-        let (lhs_fields, rhs_fields) = match (lhs_root_node, rhs_root_node) {
-            (StoreNode::Struct { fields: lf }, StoreNode::Struct { fields: rf }) => (lf, rf),
-            _ => {
-                return Err(format!(
-                    "Component `{}`: Query roots are expected to be struct values",
-                    comp_name
-                ));
-            }
-        };
-
-        // Enforce identical struct shape at the root.
-        if lhs_fields.len() != rhs_fields.len() {
-            return Err(format!(
-                "Component `{}`: root struct shape mismatch (lhs has {}, rhs has {})",
-                comp_name,
-                lhs_fields.len(),
-                rhs_fields.len()
-            ));
-        }
-
-        // Split scalar pairs into input fields and output fields.
-        let mut input_pairs: Vec<(SymExpr, SymExpr)> = Vec::new();
-        let mut output_pairs: Vec<(SymExpr, SymExpr)> = Vec::new();
-
-        let mut keys: Vec<i64> = lhs_fields.keys().cloned().collect();
-        keys.sort_unstable();
-
-        for fid in keys {
-            let role = field_roles.get(&fid).ok_or_else(|| {
-                format!(
-                    "Component `{}`: no IO role recorded for field id {}",
-                    comp_name, fid
-                )
-            })?;
-
-            let lnode = lhs_fields
-                .get(&fid)
-                .ok_or_else(|| format!("lhs missing field id {} in root struct", fid))?;
-            let rnode = rhs_fields
-                .get(&fid)
-                .ok_or_else(|| format!("rhs missing field id {} in root struct", fid))?;
-
-            let (lv, rv) = match (lnode, rnode) {
-                (StoreNode::Scalar(a), StoreNode::Scalar(b)) => (a.clone(), b.clone()),
-                _ => {
+                // Enforce identical struct shape at the root.
+                if lhs_fields.len() != rhs_fields.len() {
                     return Err(format!(
-                        "Component `{}`: non-scalar field id {} under Query root",
-                        comp_name, fid
+                        "Component `{}`: root struct shape mismatch (lhs has {}, rhs has {}) on paths ({}, {})",
+                        comp_name,
+                        lhs_fields.len(),
+                        rhs_fields.len(),
+                        li,
+                        rj
                     ));
                 }
-            };
 
-            match role {
-                IOType::Input => input_pairs.push((lv, rv)),
-                IOType::Output => output_pairs.push((lv, rv)),
+                // Split scalar pairs into input fields and output fields.
+                let mut input_pairs: Vec<(SymExpr, SymExpr)> = Vec::new();
+                let mut output_pairs: Vec<(SymExpr, SymExpr)> = Vec::new();
+
+                let mut keys: Vec<i64> = lhs_fields.keys().cloned().collect();
+                keys.sort_unstable();
+
+                for fid in keys {
+                    let role = field_roles.get(&fid).ok_or_else(|| {
+                        format!(
+                            "Component `{}`: no IO role recorded for field id {}",
+                            comp_name, fid
+                        )
+                    })?;
+
+                    let lnode = lhs_fields.get(&fid).ok_or_else(|| {
+                        format!("lhs missing field id {} in root struct on path {}", fid, li)
+                    })?;
+                    let rnode = rhs_fields.get(&fid).ok_or_else(|| {
+                        format!("rhs missing field id {} in root struct on path {}", fid, rj)
+                    })?;
+
+                    let (lv, rv) = match (lnode, rnode) {
+                        (StoreNode::Scalar(a), StoreNode::Scalar(b)) => (a.clone(), b.clone()),
+                        _ => {
+                            return Err(format!(
+                                "Component `{}`: non-scalar field id {} under Query root (paths {}, {})",
+                                comp_name, fid, li, rj
+                            ));
+                        }
+                    };
+
+                    match role {
+                        IOType::Input => input_pairs.push((lv, rv)),
+                        IOType::Output => output_pairs.push((lv, rv)),
+                    }
+                }
+
+                if output_pairs.is_empty() {
+                    return Err(format!(
+                        "Component `{}`: no output fields were found under the Query roots (paths {}, {})",
+                        comp_name, li, rj
+                    ));
+                }
+
+                // Constrain all input fields of the two roots to be equal.
+                let eq_inputs = if input_pairs.is_empty() {
+                    BoolExpr::Bool(true)
+                } else {
+                    let atoms: Vec<BoolExpr> = input_pairs
+                        .into_iter()
+                        .map(|(a, b)| BoolExpr::Eq(a, b))
+                        .collect();
+                    BoolExpr::and(atoms)
+                };
+
+                // Require at least one output field to differ in a counterexample.
+                let outputs_diff = BoolExpr::or(
+                    output_pairs
+                        .into_iter()
+                        .map(|(a, b)| BoolExpr::Ne(a, b))
+                        .collect(),
+                );
+
+                let pc_lhs = lhs_final.pc();
+                let pc_rhs = rhs_final.pc();
+
+                // φ is satisfiable iff there exists a model with equal inputs and
+                // differing outputs under both implementations along this path pair.
+                let phi = BoolExpr::and(vec![pc_lhs, pc_rhs, eq_inputs, outputs_diff]);
+
+                println!(
+                    "Component `{}` (lhs path {}, rhs path {}): generated SMT formula for equivalence checking:\n{}",
+                    comp_name, li, rj, phi
+                );
+
+                let sat = check_with_z3(&phi)?;
+                if sat {
+                    return Err(format!(
+                        "Component `{}`: equivalence check failed; SMT found a model with equal inputs but differing outputs (lhs path {}, rhs path {})",
+                        comp_name, li, rj
+                    ));
+                }
             }
         }
 
-        if output_pairs.is_empty() {
-            return Err(format!(
-                "Component `{}`: no output fields were found under the Query roots",
-                comp_name
-            ));
-        }
-
-        // Constrain all input fields of the two roots to be equal.
-        let eq_inputs = if input_pairs.is_empty() {
-            BoolExpr::Bool(true)
-        } else {
-            let atoms: Vec<BoolExpr> = input_pairs
-                .into_iter()
-                .map(|(a, b)| BoolExpr::Eq(a, b))
-                .collect();
-            BoolExpr::and(atoms)
-        };
-
-        // Require at least one output field to differ in a counterexample.
-        let outputs_diff = BoolExpr::or(
-            output_pairs
-                .into_iter()
-                .map(|(a, b)| BoolExpr::Ne(a, b))
-                .collect(),
-        );
-
-        let pc_lhs = lhs_final.pc();
-        let pc_rhs = rhs_final.pc();
-
-        // φ is satisfiable iff there exists a model with equal inputs and
-        // differing outputs under both implementations.
-        let phi = BoolExpr::and(vec![pc_lhs, pc_rhs, eq_inputs, outputs_diff]);
-
         println!(
-            "Component `{}`: generated SMT formula for equivalence checking:\n{}",
-            comp_name, phi
+            "Component `{}`: equivalence holds (no model with equal inputs and differing outputs across all path pairs)",
+            comp_name
         );
-
-        let sat = check_with_z3(&phi)?;
-        if sat {
-            return Err(format!(
-                "Component `{}`: equivalence check failed; SMT found a model with equal inputs but differing outputs",
-                comp_name
-            ));
-        } else {
-            println!(
-                "Component `{}`: equivalence holds (no model with equal inputs and differing outputs)",
-                comp_name
-            );
-        }
     }
 
     Ok(())

@@ -162,6 +162,11 @@ impl SymbolicExecutor for Func {
                 break;
             }
         }
+        // Any state that reaches the end of the body without an explicit return
+        // is treated as a terminal fall-through with no return value.
+        for st in live {
+            terminals.push_back((None, st));
+        }
 
         terminals
     }

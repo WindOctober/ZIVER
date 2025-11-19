@@ -26,7 +26,7 @@ pub fn eval_index_const_or_err(ctx: &Context, store: Option<&Store>, e: &Expr) -
         // Identifier or path: first consult the runtime store (if any),
         // then fall back to compile-time consts.
         Expr::Path { ref_id, segments } => {
-            // 1) Runtime resolution via store.
+            // Runtime resolution via store.
             if let Some(st) = store {
                 if let Some(node) = st.query_scalar(&Expr::Path {
                     ref_id: *ref_id,
@@ -40,7 +40,7 @@ pub fn eval_index_const_or_err(ctx: &Context, store: Option<&Store>, e: &Expr) -
                 }
             }
 
-            // 2) Compile-time const resolution via `Context.const_int`.
+            // Compile-time const resolution via `Context.const_int`.
             if let Some(cid) = *ref_id {
                 if let Some(k) = ctx.const_int(cid) {
                     if k <= usize::MAX as u64 {
