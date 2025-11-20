@@ -1,4 +1,8 @@
-use crate::{ast::*, utils::module_resolver::Module};
+use crate::{
+    ast::*,
+    checker::symbolic::expr::{SymExpr, SymType},
+    utils::module_resolver::Module,
+};
 use std::collections::HashMap;
 
 /// Per-struct member index used for field/method lookup.
@@ -54,6 +58,9 @@ pub struct Context {
 }
 
 impl Context {
+    /// Default width for integer literals.
+    const DEFAULT_INT_WIDTH: usize = 64;
+
     /// Returns the struct id associated with a component or struct name.
     pub fn struct_id_by_name(&self, name: &str) -> Option<i64> {
         self.struct_index.get(name).copied()
@@ -91,6 +98,154 @@ impl Context {
         self.types.const_ints.get(&id).copied()
     }
 
+    /// Construct builtin `bool` type.
+    pub fn builtin_bool_type(&self) -> Type {
+        Type::Path {
+            ref_id: None,
+            segments: vec!["bool".to_string()],
+        }
+    }
+
+    /// Construct builtin field type (`field`).
+    pub fn builtin_field_type(&self) -> Type {
+        Type::Path {
+            ref_id: None,
+            segments: vec!["field".to_string()],
+        }
+    }
+
+    /// Construct builtin unsigned integer type `u{bits}`.
+    pub fn builtin_uint_type(&self, bits: usize) -> Type {
+        Type::Path {
+            ref_id: None,
+            segments: vec![format!("u{}", bits)],
+        }
+    }
+
+    /// Construct builtin signed integer type `i{bits}`.
+    pub fn builtin_int_type(&self, bits: usize) -> Type {
+        Type::Path {
+            ref_id: None,
+            segments: vec![format!("i{}", bits)],
+        }
+    }
+
+    /// Map an AST type to a builtin scalar SymType, if possible.
+    /// Only builtin scalars are mapped; structs/arrays/functions are rejected.
+    pub fn builtin_type_to_sym_type(&self, ty: &Type) -> Option<SymType> {
+        match self.classify_type(ty) {
+            Ok(PathKind::Builtin) => {
+                let Type::Path { segments, .. } = ty else {
+                    unreachable!("classify_type returned Builtin for non-Path");
+                };
+                let last = segments.last()?.to_ascii_lowercase();
+
+                // Ignore Selector Variable.
+                if last == "selector" {
+                    return Some(SymType::Bool);
+                }
+
+                if last == "bool" {
+                    return Some(SymType::Bool);
+                }
+                if last == "field" || last == "f" {
+                    return Some(SymType::F);
+                }
+                if let Some(bits) = last.strip_prefix('u') {
+                    let w = bits.parse::<usize>().ok()?;
+                    return Some(SymType::Uint(w));
+                }
+                if let Some(bits) = last.strip_prefix('i') {
+                    let w = bits.parse::<usize>().ok()?;
+                    return Some(SymType::Int(w));
+                }
+
+                None
+            }
+            Ok(PathKind::Struct(_)) => None,
+            Err(_) => None,
+        }
+    }
+
+    /// Map a scalar SymType back to a builtin AST type.
+    pub fn sym_type_to_builtin_type(&self, sty: &SymType) -> Type {
+        match *sty {
+            SymType::Bool => self.builtin_bool_type(),
+            SymType::F => self.builtin_field_type(),
+            SymType::Uint(w) => self.builtin_uint_type(w),
+            SymType::Int(w) => self.builtin_int_type(w),
+        }
+    }
+
+    /// Combine two SymType values under a binary operator.
+    /// Returns the resulting SymType if the combination is well-typed.
+    pub fn combine_sym_types_for_binary(
+        &self,
+        op: &BinOp,
+        lhs: SymType,
+        rhs: SymType,
+    ) -> Option<SymType> {
+        use SymType::*;
+
+        // Comparison and equality always return Bool if operands are compatible.
+        match op {
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                let compatible = match (&lhs, &rhs) {
+                    (F, F) => true,
+                    (Uint(_), Uint(_)) => true,
+                    (Int(_), Int(_)) => true,
+                    (Bool, Bool) => true,
+                    (Bool, Uint(_)) | (Uint(_), Bool) => true,
+                    _ => false,
+                };
+                if compatible {
+                    return Some(Bool);
+                } else {
+                    return None;
+                }
+            }
+
+            // Logical operators only work on Bool.
+            BinOp::And | BinOp::Or => {
+                if lhs == Bool && rhs == Bool {
+                    return Some(Bool);
+                } else {
+                    return None;
+                }
+            }
+
+            // All other operators are treated as arithmetic-like.
+            _ => {}
+        }
+
+        // Arithmetic-like operators.
+        match (lhs, rhs) {
+            // Field operations: only F with F.
+            (F, F) => Some(F),
+
+            // Unsigned integers: widen to max width.
+            (Uint(w1), Uint(w2)) => Some(Uint(std::cmp::max(w1, w2))),
+
+            // Signed integers: widen to max width.
+            (Int(w1), Int(w2)) => Some(Int(std::cmp::max(w1, w2))),
+
+            // Mixed signed/unsigned: promote to signed with max width.
+            (Int(wi), Uint(wu)) | (Uint(wu), Int(wi)) => Some(Int(std::cmp::max(wi, wu))),
+
+            // Bool with Uint: treat Bool as u1.
+            (Bool, Uint(w)) | (Uint(w), Bool) => {
+                let w_bool = 1;
+                Some(Uint(std::cmp::max(w, w_bool)))
+            }
+
+            // Arithmetic on Bool-only: treat as u1.
+            (Bool, Bool) => Some(Uint(1)),
+
+            // Other combinations are rejected (e.g. Bool with Field, Field with Int/Uint).
+            _ => None,
+        }
+    }
+
     /// Query the static type of a non-function id.
     /// Looks up var, const, or field types only.
     pub fn query_type(&self, id: i64) -> Option<&Type> {
@@ -105,8 +260,14 @@ impl Context {
     /// Precondition: `ty` must be `Type::Path`; otherwise this function panics.
     pub fn classify_type(&self, ty: &Type) -> Result<PathKind, String> {
         // Precondition check: accept only Path, reject others immediately.
-        let Type::Path { segments, .. } = ty else {
-            unreachable!("classify_path_by_name_strict: expected Type::Path, got non-Path");
+        let segments = match ty {
+            Type::Path { segments, .. } => segments,
+            other => {
+                return Err(format!(
+                    "cannot classify non-path type as builtin/struct: {:?}",
+                    other
+                ));
+            }
         };
 
         #[inline]
@@ -114,7 +275,17 @@ impl Context {
             // Extend to your DSL's primitive set as needed.
             matches!(
                 name.to_ascii_lowercase().as_str(),
-                "bool" | "field" | "u8" | "u16" | "u32" | "u64" | "u128" | "i32" | "i64"
+                "bool"
+                    | "field"
+                    | "f"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "i32"
+                    | "i64"
+                    | "selector"
             )
         }
 
@@ -136,8 +307,11 @@ impl Context {
     /// Best-effort static type inference from ids already attached to nodes.
     pub fn infer_expr_type(&self, e: &Expr) -> Option<Type> {
         match e {
-            Expr::Int(_) => None,
-            Expr::Bool(_) => None,
+            // Integer literals: give them a default builtin integer type.
+            Expr::Int(_) => Some(self.builtin_uint_type(Self::DEFAULT_INT_WIDTH)),
+
+            // Boolean literals: builtin bool type.
+            Expr::Bool(_) => Some(self.builtin_bool_type()),
 
             Expr::Path { ref_id, .. } => {
                 if let Some(id) = *ref_id {
@@ -163,6 +337,7 @@ impl Context {
                         return Some(Type::Function { ref_id: Some(id) });
                     }
                 }
+                // Fallback: use the base expression type if we cannot resolve field id directly.
                 self.infer_expr_type(base)
             }
 
@@ -175,7 +350,19 @@ impl Context {
                 None
             }
 
-            Expr::Binary { .. } => None,
+            // New: binary expression type inference via SymType normalization.
+            Expr::Binary { op, lhs, rhs } => {
+                let lt = self.infer_expr_type(lhs)?;
+                let rt = self.infer_expr_type(rhs)?;
+
+                // Only builtin scalar types participate in this normalization.
+                let ls = self.builtin_type_to_sym_type(&lt)?;
+                let rs = self.builtin_type_to_sym_type(&rt)?;
+
+                let res_sym = self.combine_sym_types_for_binary(op, ls, rs)?;
+                Some(self.sym_type_to_builtin_type(&res_sym))
+            }
+
             Expr::Paren(inner) => self.infer_expr_type(inner),
         }
     }
@@ -199,6 +386,36 @@ impl Context {
     /// Convenience: check if `func_id` is a method of `struct_id`.
     pub fn is_method_of(&self, func_id: i64, struct_id: i64) -> bool {
         self.func_owner.get(&func_id).copied() == Some(struct_id)
+    }
+    /// Resolve a method id by struct id and method name.
+    pub fn resolve_method_on_struct(&self, struct_id: i64, method_name: &str) -> Option<i64> {
+        let members = self.struct_members(struct_id)?;
+        match members.get(method_name)? {
+            MemberIndex::Method { func_id } => Some(*func_id),
+            _ => None,
+        }
+    }
+
+    /// Resolve a call callee from an lvalue.
+    /// Handles qualified methods like `TypeName::method(...)`.
+    pub fn resolve_call_from_lvalue(&self, callee: &LValue) -> (i64, Option<SymExpr>) {
+        // Qualified static method: TypeName::method(...)
+        if let Some(struct_id) = callee.ref_id {
+            if callee.tails.len() == 1 {
+                if let LvTail::Field { name } = &callee.tails[0] {
+                    if let Some(fid) = self.resolve_method_on_struct(struct_id, name.as_str()) {
+                        return (fid, None);
+                    }
+                }
+            }
+        }
+
+        // Fallback: use ref_id as a function id if present.
+        if let Some(fid) = callee.ref_id {
+            return (fid, None);
+        }
+
+        panic!("cannot resolve function call from lvalue: {:?}", callee);
     }
 }
 
@@ -332,17 +549,14 @@ pub fn init_context(mods: &mut [Module]) -> Context {
                         .get(comp_name)
                         .expect("Component must pair with same-named Struct");
 
-                    // Ensure the struct has a member map to extend with methods.
                     ctx.struct_fields.entry(struct_id).or_default();
 
-                    // Allocate function ids, expose globally, and bind as methods of the struct.
                     for mem in members.iter_mut() {
                         match mem {
                             Member::Computation(fun) | Member::Constraint(fun) => {
                                 if fun.id.is_none() {
                                     let fid = fresh_id(&mut ctx.next_sym_id);
                                     fun.id = Some(fid);
-                                    scope.insert_global(fun.name.clone(), fid);
                                 }
                                 let fid = fun.id.unwrap();
                                 ctx.struct_fields

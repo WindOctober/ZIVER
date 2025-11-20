@@ -4,7 +4,7 @@ pub(crate) mod symbolic;
 use std::{collections::HashMap, rc::Rc};
 
 use crate::{
-    ast::{Expr, File, Func, IOType, Item},
+    ast::{Expr, File, Func, IOType, Item, Type},
     checker::{
         solver::check_with_z3,
         symbolic::{
@@ -87,6 +87,196 @@ impl<'a> QueryCheck<'a> {
         })
     }
 
+    /// Recursively collect scalar pairs under a node typed by `ty`.
+    /// The IO role is inherited from the parent field or parameter.
+    fn collect_node_pairs_for_type(
+        &self,
+        ty: &Type,
+        io: &IOType,
+        lhs_node: &StoreNode,
+        rhs_node: &StoreNode,
+        li: usize,
+        rj: usize,
+        input_pairs: &mut Vec<(SymExpr, SymExpr)>,
+        output_pairs: &mut Vec<(SymExpr, SymExpr)>,
+    ) -> Result<(), String> {
+        match ty {
+            // Arrays: drill into each element with the same IO role.
+            Type::Array(inner, _len_expr) => {
+                let (llen, lelems, rlen, relems) = match (lhs_node, rhs_node) {
+                    (
+                        StoreNode::Array {
+                            len: llen,
+                            elems: lelems,
+                        },
+                        StoreNode::Array {
+                            len: rlen,
+                            elems: relems,
+                        },
+                    ) => (llen, lelems, rlen, relems),
+                    _ => {
+                        return Err(format!(
+                            "Component `{}`: array-typed Query node must be backed by array store nodes (paths {}, {})",
+                            self.comp_name, li, rj
+                        ));
+                    }
+                };
+
+                // Prefer length checks when both sides have explicit lengths.
+                if let (Some(llen), Some(rlen)) = (llen, rlen) {
+                    if llen != rlen {
+                        return Err(format!(
+                            "Component `{}`: array length mismatch in Query root (lhs {}, rhs {}, paths {}, {})",
+                            self.comp_name, llen, rlen, li, rj
+                        ));
+                    }
+                    for i in 0..*llen {
+                        let lcell = lelems.get(&i).ok_or_else(|| {
+                            format!(
+                                "Component `{}`: lhs array element {} missing in Query root (paths {}, {})",
+                                self.comp_name, i, li, rj
+                            )
+                        })?;
+                        let rcell = relems.get(&i).ok_or_else(|| {
+                            format!(
+                                "Component `{}`: rhs array element {} missing in Query root (paths {}, {})",
+                                self.comp_name, i, li, rj
+                            )
+                        })?;
+                        self.collect_node_pairs_for_type(
+                            inner,
+                            io,
+                            lcell,
+                            rcell,
+                            li,
+                            rj,
+                            input_pairs,
+                            output_pairs,
+                        )?;
+                    }
+                } else {
+                    // Fallback: iterate over common indices when length metadata is missing.
+                    let mut idxs: Vec<usize> = lelems
+                        .keys()
+                        .filter(|i| relems.contains_key(i))
+                        .cloned()
+                        .collect();
+                    idxs.sort_unstable();
+
+                    for i in idxs {
+                        let lcell = lelems.get(&i).unwrap();
+                        let rcell = relems.get(&i).unwrap();
+                        self.collect_node_pairs_for_type(
+                            inner,
+                            io,
+                            lcell,
+                            rcell,
+                            li,
+                            rj,
+                            input_pairs,
+                            output_pairs,
+                        )?;
+                    }
+                }
+
+                Ok(())
+            }
+
+            // Structs: recurse into all materialized fields, inheriting the same IO role.
+            Type::Path { ref_id, .. } => {
+                // Builtin scalar vs struct is decided by `classify_type`.
+                match self.ctx.classify_type(ty) {
+                    Ok(PathKind::Builtin) => {
+                        // Scalar leaf: nodes must be scalar.
+                        let (lv, rv) = match (lhs_node, rhs_node) {
+                            (StoreNode::Scalar(a), StoreNode::Scalar(b)) => (a.clone(), b.clone()),
+                            _ => {
+                                return Err(format!(
+                                    "Component `{}`: scalar-typed Query node must be scalar in store (paths {}, {})",
+                                    self.comp_name, li, rj
+                                ));
+                            }
+                        };
+
+                        match io {
+                            IOType::Input => input_pairs.push((lv, rv)),
+                            IOType::Output => output_pairs.push((lv, rv)),
+                        }
+
+                        Ok(())
+                    }
+
+                    Ok(PathKind::Struct(sid)) => {
+                        let sid = (*ref_id).unwrap_or(sid);
+
+                        let (lf, rf) = match (lhs_node, rhs_node) {
+                            (
+                                StoreNode::Struct { fields: lf },
+                                StoreNode::Struct { fields: rf },
+                            ) => (lf, rf),
+                            _ => {
+                                return Err(format!(
+                                    "Component `{}`: struct-typed Query node must be backed by struct store nodes (paths {}, {})",
+                                    self.comp_name, li, rj
+                                ));
+                            }
+                        };
+
+                        // Iterate all field ids present on the lhs; expect rhs to match.
+                        let mut keys: Vec<i64> = lf.keys().cloned().collect();
+                        keys.sort_unstable();
+
+                        for fid in keys {
+                            let lchild = lf.get(&fid).ok_or_else(|| {
+                                format!(
+                                    "lhs missing field id {} in struct under Query root (paths {}, {})",
+                                    fid, li, rj
+                                )
+                            })?;
+                            let rchild = rf.get(&fid).ok_or_else(|| {
+                                format!(
+                                    "rhs missing field id {} in struct under Query root (paths {}, {})",
+                                    fid, li, rj
+                                )
+                            })?;
+
+                            let child_ty = self.ctx.query_type(fid).ok_or_else(|| {
+                                format!(
+                                    "Component `{}`: no static type recorded for field id {} in struct {}",
+                                    self.comp_name, fid, sid
+                                )
+                            })?;
+
+                            // IO role is inherited from the parent field or parameter.
+                            self.collect_node_pairs_for_type(
+                                child_ty,
+                                io,
+                                lchild,
+                                rchild,
+                                li,
+                                rj,
+                                input_pairs,
+                                output_pairs,
+                            )?;
+                        }
+
+                        Ok(())
+                    }
+
+                    Err(e) => Err(format!(
+                        "Component `{}`: failed to classify Query node type `{:?}`: {} (paths {}, {})",
+                        self.comp_name, ty, e, li, rj
+                    )),
+                }
+            }
+
+            Type::Function { .. } => Err(format!(
+                "Component `{}`: function-typed value cannot be used as a Query root or field (paths {}, {})",
+                self.comp_name, li, rj
+            )),
+        }
+    }
+
     /// Collect scalar input/output pairs contributed by the k-th root pair.
     fn collect_root_pairs(
         &self,
@@ -106,20 +296,22 @@ impl<'a> QueryCheck<'a> {
         let lhs_ty = self
             .ctx
             .infer_expr_type(lhs_expr)
-            .ok_or_else(|| format!("failed to infer type for LHS Query root `{:?}`", lhs_path))?;
+            .ok_or_else(|| format!("failed to infer type for LHS root `{:?}`", lhs_path))?;
+
         let rhs_ty = self
             .ctx
             .infer_expr_type(rhs_expr)
-            .ok_or_else(|| format!("failed to infer type for RHS Query root `{:?}`", rhs_path))?;
+            .ok_or_else(|| format!("failed to infer type for RHS root `{:?}`", rhs_path))?;
 
-        let lhs_kind = self.ctx.classify_type(&lhs_ty);
-        let rhs_kind = self.ctx.classify_type(&rhs_ty);
-
-        match (lhs_kind, rhs_kind) {
-            (Ok(PathKind::Struct(lsid)), Ok(PathKind::Struct(rsid))) => {
+        // Struct roots (e.g. `self`, `cols`) are handled by field-level IO roles.
+        if let (Type::Path { .. }, Type::Path { .. }) = (&lhs_ty, &rhs_ty) {
+            if let (Ok(PathKind::Struct(lsid)), Ok(PathKind::Struct(rsid))) = (
+                self.ctx.classify_type(&lhs_ty),
+                self.ctx.classify_type(&rhs_ty),
+            ) {
                 if lsid != rsid {
                     return Err(format!(
-                        "Component `{}`: Query root structs have different types (lhs struct_id {}, rhs struct_id {}, paths ({}, {}))",
+                        "Component `{}`: root struct types differ (lhs {}, rhs {}, paths {}, {})",
                         self.comp_name, lsid, rsid, li, rj
                     ));
                 }
@@ -128,13 +320,14 @@ impl<'a> QueryCheck<'a> {
 
                 let lhs_node = lhs_final.query_expr_node(lhs_expr).ok_or_else(|| {
                     format!(
-                        "Component `{}`: LHS root `{:?}` not found in final store for path {}",
+                        "Component `{}`: LHS root `{:?}` not found (path {})",
                         self.comp_name, lhs_path, li
                     )
                 })?;
+
                 let rhs_node = rhs_final.query_expr_node(rhs_expr).ok_or_else(|| {
                     format!(
-                        "Component `{}`: RHS root `{:?}` not found in final store for path {}",
+                        "Component `{}`: RHS root `{:?}` not found (path {})",
                         self.comp_name, rhs_path, rj
                     )
                 })?;
@@ -145,7 +338,7 @@ impl<'a> QueryCheck<'a> {
                     }
                     _ => {
                         return Err(format!(
-                            "Component `{}`: Query roots are expected to be struct values (paths ({}, {}))",
+                            "Component `{}`: struct root expected (paths {}, {})",
                             self.comp_name, li, rj
                         ));
                     }
@@ -153,7 +346,7 @@ impl<'a> QueryCheck<'a> {
 
                 if lhs_fields.len() != rhs_fields.len() {
                     return Err(format!(
-                        "Component `{}`: root struct shape mismatch (lhs has {}, rhs has {}) on paths ({}, {})",
+                        "Component `{}`: struct shape mismatch (lhs {}, rhs {}, paths {}, {})",
                         self.comp_name,
                         lhs_fields.len(),
                         rhs_fields.len(),
@@ -166,103 +359,95 @@ impl<'a> QueryCheck<'a> {
                 keys.sort_unstable();
 
                 for fid in keys {
-                    let role = field_roles.get(&fid).ok_or_else(|| {
+                    let io = field_roles.get(&fid).ok_or_else(|| {
                         format!(
-                            "Component `{}`: no IO role recorded for field id {}",
+                            "Component `{}`: missing IO role for field {}",
                             self.comp_name, fid
                         )
                     })?;
 
-                    let lnode = lhs_fields.get(&fid).ok_or_else(|| {
-                        format!("lhs missing field id {} in root struct on path {}", fid, li)
-                    })?;
-                    let rnode = rhs_fields.get(&fid).ok_or_else(|| {
-                        format!("rhs missing field id {} in root struct on path {}", fid, rj)
-                    })?;
+                    let lnode = lhs_fields
+                        .get(&fid)
+                        .ok_or_else(|| format!("lhs missing field {} on path {}", fid, li))?;
+                    let rnode = rhs_fields
+                        .get(&fid)
+                        .ok_or_else(|| format!("rhs missing field {} on path {}", fid, rj))?;
 
-                    let (lv, rv) = match (lnode, rnode) {
-                        (StoreNode::Scalar(a), StoreNode::Scalar(b)) => (a.clone(), b.clone()),
-                        _ => {
-                            return Err(format!(
-                                "Component `{}`: non-scalar field id {} under Query root (paths {}, {})",
-                                self.comp_name, fid, li, rj
-                            ));
-                        }
-                    };
-
-                    match role {
-                        IOType::Input => input_pairs.push((lv, rv)),
-                        IOType::Output => output_pairs.push((lv, rv)),
-                    }
-                }
-
-                Ok(())
-            }
-
-            (Ok(PathKind::Builtin), Ok(PathKind::Builtin)) => {
-                // Scalar roots: IO role comes from parameter-level annotation.
-                let io_lhs = self
-                    .lhs_func
-                    .param_io_for_query_path(lhs_path)
-                    .ok_or_else(|| {
+                    let fty = self.ctx.query_type(fid).ok_or_else(|| {
                         format!(
-                            "Component `{}`: no IO role recorded for LHS parameter `{:?}`",
-                            self.comp_name, lhs_path
-                        )
-                    })?;
-                let io_rhs = self
-                    .rhs_func
-                    .param_io_for_query_path(rhs_path)
-                    .ok_or_else(|| {
-                        format!(
-                            "Component `{}`: no IO role recorded for RHS parameter `{:?}`",
-                            self.comp_name, rhs_path
+                            "Component `{}`: missing static type for field {}",
+                            self.comp_name, fid
                         )
                     })?;
 
-                if io_lhs != io_rhs {
-                    return Err(format!(
-                        "Component `{}`: mismatched IO roles for scalar roots `{:?}` and `{:?}` (lhs: {:?}, rhs: {:?})",
-                        self.comp_name, lhs_path, rhs_path, io_lhs, io_rhs
-                    ));
+                    self.collect_node_pairs_for_type(
+                        fty,
+                        io,
+                        lnode,
+                        rnode,
+                        li,
+                        rj,
+                        input_pairs,
+                        output_pairs,
+                    )?;
                 }
 
-                let lhs_node = lhs_final.query_expr_node(lhs_expr).ok_or_else(|| {
-                    format!(
-                        "Component `{}`: LHS scalar root `{:?}` not found in final store for path {}",
-                        self.comp_name, lhs_path, li
-                    )
-                })?;
-                let rhs_node = rhs_final.query_expr_node(rhs_expr).ok_or_else(|| {
-                    format!(
-                        "Component `{}`: RHS scalar root `{:?}` not found in final store for path {}",
-                        self.comp_name, rhs_path, rj
-                    )
-                })?;
-
-                let (lv, rv) = match (lhs_node, rhs_node) {
-                    (StoreNode::Scalar(a), StoreNode::Scalar(b)) => (a.clone(), b.clone()),
-                    _ => {
-                        return Err(format!(
-                            "Component `{}`: scalar Query roots must be scalar nodes (paths {}, {})",
-                            self.comp_name, li, rj
-                        ));
-                    }
-                };
-
-                match io_lhs {
-                    IOType::Input => input_pairs.push((lv, rv)),
-                    IOType::Output => output_pairs.push((lv, rv)),
-                }
-
-                Ok(())
+                return Ok(());
             }
-
-            (lk, rk) => Err(format!(
-                "Component `{}`: Query roots must have the same sort kind, got lhs={:?}, rhs={:?} (paths {}, {})",
-                self.comp_name, lk, rk, li, rj
-            )),
         }
+
+        // Non-struct roots (scalars, arrays, nested composites) use parameter-level IO roles.
+        let io_lhs = self
+            .lhs_func
+            .param_io_for_query_path(lhs_path)
+            .ok_or_else(|| {
+                format!(
+                    "Component `{}`: missing IO role for LHS param `{:?}`",
+                    self.comp_name, lhs_path
+                )
+            })?;
+
+        let io_rhs = self
+            .rhs_func
+            .param_io_for_query_path(rhs_path)
+            .ok_or_else(|| {
+                format!(
+                    "Component `{}`: missing IO role for RHS param `{:?}`",
+                    self.comp_name, rhs_path
+                )
+            })?;
+
+        if io_lhs != io_rhs {
+            return Err(format!(
+                "Component `{}`: mismatched IO roles for `{:?}` vs `{:?}`",
+                self.comp_name, lhs_path, rhs_path
+            ));
+        }
+
+        let lhs_node = lhs_final.query_expr_node(lhs_expr).ok_or_else(|| {
+            format!(
+                "Component `{}`: LHS root `{:?}` not found (path {})",
+                self.comp_name, lhs_path, li
+            )
+        })?;
+
+        let rhs_node = rhs_final.query_expr_node(rhs_expr).ok_or_else(|| {
+            format!(
+                "Component `{}`: RHS root `{:?}` not found (path {})",
+                self.comp_name, rhs_path, rj
+            )
+        })?;
+
+        self.collect_node_pairs_for_type(
+            &lhs_ty,
+            &io_lhs,
+            lhs_node,
+            rhs_node,
+            li,
+            rj,
+            input_pairs,
+            output_pairs,
+        )
     }
 }
 

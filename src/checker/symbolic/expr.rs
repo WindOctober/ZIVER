@@ -46,6 +46,13 @@ pub enum BoolExpr {
     Gt(SymExpr, SymExpr),
 }
 
+impl BoolExpr {
+    /// Interpret this Boolean as an integer 0/1 expression.
+    pub fn as_int(self) -> SymExpr {
+        SymExpr::ite(self, SymExpr::Int(1), SymExpr::Int(0))
+    }
+}
+
 impl SymExpr {
     /// Wraps the expression in a BabyBear field reduction `(e mod p)`.
     pub fn mod_field(self) -> Self {

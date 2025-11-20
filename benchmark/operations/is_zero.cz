@@ -16,7 +16,7 @@ Component IsZeroOperation {
     return self.result;
   }
 
-  Constraint eval(self, input a: field,cols:IsZeroOperation, is_real: field) {
+  Constraint eval(input a: field,cols:IsZeroOperation, is_real: field) {
     assert_bool(cols.result);
 
     field one = 1;

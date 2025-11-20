@@ -10,6 +10,20 @@ use crate::{
     },
 };
 
+/// Logical place of a method receiver inside the store:
+/// root variable and a sequence of field / index steps.
+#[derive(Clone, Debug)]
+struct ReceiverPlace {
+    root_vid: i64,
+    steps: Vec<ReceiverStep>,
+}
+
+#[derive(Clone, Debug)]
+enum ReceiverStep {
+    Field(i64),
+    Index(usize),
+}
+
 pub trait SymbolicExecutor {
     /// Execute one step and produce successor states.
     /// For non-return statements/expressions, the first item is None.
@@ -182,29 +196,93 @@ impl SymbolicExecutor for Stmt {
         fn eval_bool_expr(e: Expr, st: SymState) -> (BoolExpr, SymState) {
             match e {
                 Expr::Bool(b) => (BoolExpr::Bool(b), st),
+
                 Expr::Paren(inner) => eval_bool_expr(*inner, st),
-                Expr::Binary {
-                    op: BinOp::Eq,
-                    lhs,
-                    rhs,
-                } => {
-                    // Sequential: eval lhs then rhs on resulting state
+
+                Expr::Binary { op, lhs, rhs } => {
+                    // Sequential: eval lhs then rhs on resulting state.
                     let l = lhs.eval(st);
                     if l.len() != 1 {
-                        panic!("branching in AssertBool(Eq.lhs) unsupported");
+                        panic!("branching in BoolExpr(lhs) unsupported for `{:?}`", op);
                     }
                     let (lv, s1) = l[0].clone();
 
                     let r = rhs.eval(s1);
                     if r.len() != 1 {
-                        panic!("branching in AssertBool(Eq.rhs) unsupported");
+                        panic!("branching in BoolExpr(rhs) unsupported for `{:?}`", op);
                     }
                     let (rv, s2) = r[0].clone();
 
-                    (lv.eq_to(rv), s2)
+                    let cond = match op {
+                        BinOp::Eq => lv.eq_to(rv),
+                        BinOp::Ne => lv.ne(rv),
+                        BinOp::Lt => lv.lt(rv),
+                        BinOp::Le => lv.le(rv),
+                        BinOp::Gt => lv.gt(rv),
+                        BinOp::Ge => lv.ge(rv),
+
+                        // Logical operators treat non-zero as true.
+                        BinOp::And => {
+                            let c1 = lv.ne(SymExpr::Int(0));
+                            let c2 = rv.ne(SymExpr::Int(0));
+                            BoolExpr::and(vec![c1, c2])
+                        }
+                        BinOp::Or => {
+                            let c1 = lv.ne(SymExpr::Int(0));
+                            let c2 = rv.ne(SymExpr::Int(0));
+                            BoolExpr::or(vec![c1, c2])
+                        }
+
+                        // Not a Boolean operator in this context.
+                        other => {
+                            panic!("non-Boolean binary operator in condition: `{:?}`", other);
+                        }
+                    };
+
+                    (cond, s2)
                 }
-                _ => panic!("unsupported Boolean expression in AssertBool"),
+
+                _ => panic!("unsupported Boolean expression in condition: `{:?}`", e),
             }
+        }
+
+        /// Evaluate a scalar compound assignment like `x op= e` with branching.
+        /// The lvalue is read first, then the RHS is evaluated on each post-read state.
+        /// For every pair (cur, rhs) the `combine` function builds the new scalar value.
+        fn eval_scalar_assign_update<F>(
+            target: &LValue,
+            value: &Expr,
+            st: SymState,
+            op_name: &'static str,
+            combine: F,
+        ) -> Vector<(Option<SymExpr>, SymState)>
+        where
+            F: Fn(SymExpr, SymExpr) -> SymExpr,
+        {
+            // Read current value of the lvalue as an expression.
+            let as_expr = lvalue_to_expr(target);
+            let cur_vals = as_expr.eval(st);
+            if cur_vals.is_empty() {
+                panic!("{}: lvalue read produced no result", op_name);
+            }
+
+            let mut out: Vector<(Option<SymExpr>, SymState)> = Vector::new();
+
+            // For each possible current value, evaluate RHS sequentially.
+            for (cur, s_after_read) in cur_vals {
+                let rhs_vals = value.clone().eval(s_after_read);
+                if rhs_vals.is_empty() {
+                    panic!("{}: RHS produced no result", op_name);
+                }
+
+                for (rhs, mut s_rhs) in rhs_vals {
+                    let newv = combine(cur.clone(), rhs);
+                    s_rhs.store = write_to_lvalue(&s_rhs.ctx, s_rhs.store.clone(), target, newv);
+                    out.push_back((None, s_rhs));
+                }
+            }
+
+            out
         }
 
         match self {
@@ -227,8 +305,22 @@ impl SymbolicExecutor for Stmt {
             }
 
             Stmt::AssertBool(e) => {
-                // Boolean expressions: literal or equality.
-                if matches!(&e, Expr::Bool(_) | Expr::Binary { op: BinOp::Eq, .. }) {
+                // Boolean expressions: literals, comparisons, and && / ||.
+                if matches!(
+                    &e,
+                    Expr::Bool(_)
+                        | Expr::Binary {
+                            op: BinOp::Eq
+                                | BinOp::Ne
+                                | BinOp::Lt
+                                | BinOp::Le
+                                | BinOp::Gt
+                                | BinOp::Ge
+                                | BinOp::And
+                                | BinOp::Or,
+                            ..
+                        }
+                ) {
                     let (cond, s1) = eval_bool_expr(e, st);
                     let s2 = s1.with_pc(cond);
                     return Vector::unit((None, s2));
@@ -294,28 +386,12 @@ impl SymbolicExecutor for Stmt {
             }
 
             Stmt::AndAssign { target, value } => {
-                // Sequential: read current first, then evaluate RHS on post-read state.
-                let as_expr = lvalue_to_expr(&target);
-                let cur_vals = as_expr.eval(st);
-                if cur_vals.len() != 1 {
-                    panic!("branching read in AndAssign unsupported");
-                }
-                let (cur, s_after_read) = cur_vals[0].clone();
-
-                let rhs_vals = value.eval(s_after_read);
-                if rhs_vals.len() != 1 {
-                    panic!("branching RHS in AndAssign unsupported");
-                }
-                let (rhs, mut s1) = rhs_vals[0].clone();
-
-                let cond = BoolExpr::and(vec![cur.ne(SymExpr::Int(0)), rhs.ne(SymExpr::Int(0))]);
-                let newv = SymExpr::Ite(
-                    Box::new(cond),
-                    Box::new(SymExpr::Int(1)),
-                    Box::new(SymExpr::Int(0)),
-                );
-                s1.store = write_to_lvalue(&s1.ctx, s1.store.clone(), &target, newv);
-                Vector::unit((None, s1))
+                // Boolean-style `&=` over 0/1-encoded integers.
+                eval_scalar_assign_update(&target, &value, st, "AndAssign", |cur, rhs| {
+                    let cond =
+                        BoolExpr::and(vec![cur.ne(SymExpr::Int(0)), rhs.ne(SymExpr::Int(0))]);
+                    SymExpr::ite(cond, SymExpr::Int(1), SymExpr::Int(0))
+                })
             }
             Stmt::If {
                 cond,
@@ -395,17 +471,17 @@ impl SymbolicExecutor for Stmt {
                 // Enforce that the loop bounds are compile-time constants
                 // (literals or constant identifiers).
                 let lo = eval_index_const_or_err(&st.ctx, None, &start).unwrap_or_else(|| {
-                    panic!(
-                        "for-loop lower bound must be a constant integer or const identifier: `{:?}`",
-                        start
-                    )
-                });
+        panic!(
+            "for-loop lower bound must be a constant integer or const identifier: `{:?}`",
+            start
+        )
+    });
                 let hi = eval_index_const_or_err(&st.ctx, None, &end).unwrap_or_else(|| {
-                    panic!(
-                        "for-loop upper bound must be a constant integer or const identifier: `{:?}`",
-                        end
-                    )
-                });
+        panic!(
+            "for-loop upper bound must be a constant integer or const identifier: `{:?}`",
+            end
+        )
+    });
 
                 // Rust-style semantics: if lo >= hi, the loop body is skipped.
                 if lo >= hi {
@@ -414,7 +490,7 @@ impl SymbolicExecutor for Stmt {
 
                 let vid = id.expect("loop variable id must be assigned during resolve");
 
-                // Start from the incoming state; single-path unrolling for now.
+                // Start from the incoming state; now we allow branching across iterations.
                 let mut live: Vector<SymState> = Vector::unit(st);
                 let mut terminals: Vector<(Option<SymExpr>, SymState)> = Vector::new();
 
@@ -422,17 +498,27 @@ impl SymbolicExecutor for Stmt {
                     let mut next_live: Vector<SymState> = Vector::new();
 
                     for s in live.into_iter() {
+                        // Inactive states just flow through the loop unchanged.
+                        if !s.is_active() {
+                            next_live.push_back(s);
+                            continue;
+                        }
+
+                        // Bind loop variable for this iteration.
                         let mut s_iter = s.clone();
                         s_iter.store = s_iter
                             .store
                             .set(vid, StoreNode::Scalar(SymExpr::Int(k as i128)));
 
+                        // Execute the body as a mini "block executor" with branching.
                         let mut inner_live: Vector<SymState> = Vector::unit(s_iter);
 
                         for stmt in body.clone() {
                             let mut tmp: Vector<SymState> = Vector::new();
+
                             for s_inner in inner_live.into_iter() {
                                 if !s_inner.is_active() {
+                                    // Terminal/ inactive states flow out of the body unchanged.
                                     tmp.push_back(s_inner);
                                     continue;
                                 }
@@ -441,178 +527,83 @@ impl SymbolicExecutor for Stmt {
                                 if res.is_empty() {
                                     panic!("loop body statement produced no successor states");
                                 }
-                                if res.len() != 1 {
-                                    panic!("branching inside for-loop body is not supported");
-                                }
 
-                                let (ret, s_next) = res[0].clone();
-                                if let Some(rv) = ret {
-                                    // Propagate the return value and status out of the loop.
-                                    terminals.push_back((
-                                        Some(rv),
-                                        s_next.with_status(ExecStatus::Return),
-                                    ));
-                                } else {
-                                    tmp.push_back(s_next);
+                                for (ret, s_next) in res {
+                                    if let Some(rv) = ret {
+                                        // Return from inside the loop: record as terminal.
+                                        terminals.push_back((
+                                            Some(rv),
+                                            s_next.with_status(ExecStatus::Return),
+                                        ));
+                                    } else if s_next.is_terminal() {
+                                        // Other terminal statuses (e.g., Break/Continue if added later).
+                                        terminals.push_back((None, s_next));
+                                    } else {
+                                        tmp.push_back(s_next);
+                                    }
                                 }
                             }
+
                             inner_live = tmp;
                             if inner_live.is_empty() {
                                 break;
                             }
                         }
 
+                        // States that survive the whole body go to the next iteration.
                         for s_final in inner_live {
                             next_live.push_back(s_final);
                         }
                     }
 
                     live = next_live;
-                    // If a return has been produced, we can break out of the entire for-loop early.
+                    // If a return has been produced, or nothing remains live, exit the loop early.
                     if !terminals.is_empty() || live.is_empty() {
                         break;
                     }
                 }
 
-                if !terminals.is_empty() {
-                    // Allow treating multiple returns as multiple paths; given your current
-                    // single-path design, you may also panic when len != 1 if necessary.
-                    return terminals;
+                // Collect all terminal states (from returns etc.) and non-terminal ones
+                // that reached the end of the loop.
+                let mut out: Vector<(Option<SymExpr>, SymState)> = Vector::new();
+                for t in terminals {
+                    out.push_back(t);
+                }
+                for s_final in live {
+                    out.push_back((None, s_final));
                 }
 
-                if live.len() != 1 {
-                    panic!("branching across for-loop iterations is not supported");
-                }
-                let s_final = live[0].clone();
-                Vector::unit((None, s_final))
+                out
             }
-
             Stmt::Call { callee, args } => {
-                // Evaluate arguments sequentially.
-                let mut s = st;
-                let mut arg_vals = Vec::with_capacity(args.len());
-                for arg in args {
-                    let vals = arg.eval(s);
-                    if vals.len() != 1 {
-                        panic!("branching in call argument is not supported");
-                    }
-                    let (v, s1) = vals[0].clone();
-                    arg_vals.push(v);
-                    s = s1;
-                }
-
-                // Normalize callee.
+                // Normalize callee to an expression once.
                 let callee_expr = lvalue_to_expr(&callee);
 
-                // Builtin scalar methods like `a.inverse()`.
-                if let Expr::Field { base, name, .. } = &callee_expr {
-                    if let Some(base_ty) = s.ctx.infer_expr_type(base.as_ref()) {
-                        if let Ok(PathKind::Builtin) = s.ctx.classify_type(&base_ty) {
-                            let res = eval_builtin_method_call(
-                                s,
-                                *base.clone(),
-                                &base_ty,
-                                name.as_str(),
-                                arg_vals,
-                            );
-                            if res.len() != 1 {
-                                panic!("branching in builtin statement-level call is unsupported");
-                            }
-                            let (_v, s1) = res[0].clone();
-                            // Discard return value, keep updated state and path condition.
-                            return Vector::unit((None, s1));
-                        }
+                // Try builtin calls first. Arguments are evaluated only if the callee
+                // is recognized as a builtin.
+                if let Some(res) = try_eval_builtin_call(st.clone(), &callee_expr, args.clone()) {
+                    if res.is_empty() {
+                        panic!("builtin statement-level call produced no successor states");
                     }
-                }
-
-                // Regular function or struct method.
-                let (fid, receiver_info) = resolve_callee_expr(&s, &callee_expr);
-
-                let func = s
-                    .ctx
-                    .func_def(fid)
-                    .cloned()
-                    .unwrap_or_else(|| panic!("missing function body for id {}", fid));
-
-                // Callee state shares context, store, and path condition.
-                let mut callee_state = s.clone();
-                callee_state.status = ExecStatus::Step;
-
-                // Initialize parameters.
-                let mut arg_iter = arg_vals.into_iter();
-                let mut self_binding: Option<(i64, i64)> = None; // (caller_vid, callee_vid)
-
-                for p in &func.params {
-                    match p {
-                        Param::SelfParam { id } => {
-                            let callee_vid =
-                                id.expect("self parameter id must be assigned during resolve");
-
-                            let (caller_vid, struct_id) = receiver_info
-                                .unwrap_or_else(|| panic!("self parameter without receiver"));
-
-                            let recv_node = callee_state
-                                .store
-                                .get(caller_vid)
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "receiver variable id {} (struct_id={}) not found in store",
-                                        caller_vid, struct_id
-                                    )
-                                });
-
-                            callee_state.store =
-                                callee_state.store.clone().set(callee_vid, recv_node);
-                            self_binding = Some((caller_vid, callee_vid));
-                        }
-
-                        Param::Typed { id, ty, .. } => {
-                            let callee_vid =
-                                id.expect("parameter id must be assigned during resolve");
-                            let value = arg_iter
-                                .next()
-                                .unwrap_or_else(|| panic!("insufficient arguments in call"));
-
-                            if !ty.is_scalar(&callee_state.ctx) {
-                                panic!(
-                                    "non-scalar parameter types in calls are not supported: `{:?}`",
-                                    ty
-                                );
-                            }
-
-                            callee_state.store = callee_state
-                                .store
-                                .clone()
-                                .set(callee_vid, StoreNode::Scalar(value));
-                        }
+                    let mut out = Vector::new();
+                    for (_v, s1) in res {
+                        out.push_back((None, s1));
                     }
+                    return out;
                 }
 
-                if arg_iter.next().is_some() {
-                    panic!("too many arguments supplied to call");
+                // Regular function or method call: parameter handling is type-directed.
+                let results = eval_regular_call(st, callee_expr, args);
+                if results.is_empty() {
+                    panic!("statement-level call produced no successor states");
                 }
 
-                // Execute callee.
-                let results = func.clone().execute(callee_state);
-                if results.len() != 1 {
-                    panic!("branching in function call is not supported");
-                }
-                let (_ret, mut s_end) = results[0].clone();
-
-                // Propagate `self` back to caller if needed.
-                if let Some((caller_vid, callee_vid)) = self_binding {
-                    let node = s_end.store.get(callee_vid).cloned().unwrap_or_else(|| {
-                        panic!(
-                            "callee `self` binding id {} not found in final store",
-                            callee_vid
-                        )
-                    });
-                    s_end.store = s_end.store.clone().set(caller_vid, node);
+                let mut out: Vector<(Option<SymExpr>, SymState)> = Vector::new();
+                for (_ret_opt, s_end) in results {
+                    out.push_back((None, s_end));
                 }
 
-                s_end.status = ExecStatus::Step;
-                Vector::unit((None, s_end))
+                out
             }
 
             Stmt::Return(e) => {
@@ -632,7 +623,9 @@ impl SymbolicExecutor for Stmt {
 
 impl Expr {
     pub fn eval(self, state: SymState) -> Vector<(SymExpr, SymState)> {
-        // Sequential binary eval helper
+        /// Sequential binary eval helper that allows branching on both sides.
+        /// For each left result (lv, s1) and each right result (rv, s2),
+        /// produces one combined expression f(lv, rv) under state s2.
         fn eval_bin<F>(
             op_name: &'static str,
             lhs: Expr,
@@ -643,19 +636,28 @@ impl Expr {
         where
             F: Fn(SymExpr, SymExpr) -> SymExpr,
         {
-            let l = lhs.eval(state);
-            if l.len() != 1 {
-                panic!("branching in Binary({}) lhs unsupported", op_name);
+            // First evaluate lhs under the incoming state.
+            let l_res = lhs.eval(state);
+            if l_res.is_empty() {
+                panic!("Binary({}) lhs produced no result", op_name);
             }
-            let (lv, s1) = l[0].clone();
 
-            let r = rhs.eval(s1);
-            if r.len() != 1 {
-                panic!("branching in Binary({}) rhs unsupported", op_name);
+            let mut out: Vector<(SymExpr, SymState)> = Vector::new();
+
+            // For each lhs result, evaluate rhs sequentially on its state.
+            for (lv, s1) in l_res {
+                let r_res = rhs.clone().eval(s1);
+                if r_res.is_empty() {
+                    panic!("Binary({}) rhs produced no result", op_name);
+                }
+
+                for (rv, s2) in r_res {
+                    let combined = f(lv.clone(), rv);
+                    out.push_back((combined, s2));
+                }
             }
-            let (rv, s2) = r[0].clone();
 
-            Vector::unit((f(lv, rv), s2))
+            out
         }
 
         match self {
@@ -727,7 +729,7 @@ impl Expr {
                         if let StoreNode::Scalar(se) = cell {
                             Vector::unit((se.clone(), state))
                         } else {
-                            panic!("array elem is not scalar");
+                            panic!("array elem is not scalar: {:?} (index: {:?})", base, idx);
                         }
                     }
                     _ => panic!("indexing requires array base"),
@@ -800,127 +802,102 @@ impl Expr {
                 )
             }),
 
-            Expr::Bool(_) | Expr::Binary { op: BinOp::Eq, .. } => {
-                panic!("Boolean-valued expressions must be checked in Boolean contexts");
+            // Treat a literal Boolean as 0/1.
+            Expr::Bool(b) => {
+                let cond = BoolExpr::Bool(b);
+                let v = cond.as_int();
+                Vector::unit((v, state))
             }
 
+            // Equality as 0/1.
+            Expr::Binary {
+                op: BinOp::Eq,
+                lhs,
+                rhs,
+            } => eval_bin("Eq", *lhs, *rhs, state, |a, b| a.eq_to(b).as_int()),
+
+            // Inequality as 0/1.
+            Expr::Binary {
+                op: BinOp::Ne,
+                lhs,
+                rhs,
+            } => eval_bin("Ne", *lhs, *rhs, state, |a, b| a.ne(b).as_int()),
+
+            // Less-than as 0/1.
+            Expr::Binary {
+                op: BinOp::Lt,
+                lhs,
+                rhs,
+            } => eval_bin("Lt", *lhs, *rhs, state, |a, b| a.lt(b).as_int()),
+
+            // Less-or-equal as 0/1.
+            Expr::Binary {
+                op: BinOp::Le,
+                lhs,
+                rhs,
+            } => eval_bin("Le", *lhs, *rhs, state, |a, b| a.le(b).as_int()),
+
+            // Greater-than as 0/1.
+            Expr::Binary {
+                op: BinOp::Gt,
+                lhs,
+                rhs,
+            } => eval_bin("Gt", *lhs, *rhs, state, |a, b| a.gt(b).as_int()),
+
+            // Greater-or-equal as 0/1.
+            Expr::Binary {
+                op: BinOp::Ge,
+                lhs,
+                rhs,
+            } => eval_bin("Ge", *lhs, *rhs, state, |a, b| a.ge(b).as_int()),
+
+            // Logical AND (&&) as 0/1 using non-zero test.
+            Expr::Binary {
+                op: BinOp::And,
+                lhs,
+                rhs,
+            } => eval_bin("And", *lhs, *rhs, state, |a, b| {
+                let c1 = a.ne(SymExpr::Int(0));
+                let c2 = b.ne(SymExpr::Int(0));
+                BoolExpr::and(vec![c1, c2]).as_int()
+            }),
+
+            // Logical OR (||) as 0/1 using non-zero test.
+            Expr::Binary {
+                op: BinOp::Or,
+                lhs,
+                rhs,
+            } => eval_bin("Or", *lhs, *rhs, state, |a, b| {
+                let c1 = a.ne(SymExpr::Int(0));
+                let c2 = b.ne(SymExpr::Int(0));
+                BoolExpr::or(vec![c1, c2]).as_int()
+            }),
+
             Expr::Call(callee, args) => {
-                // Evaluate arguments sequentially.
-                let mut s = state;
-                let mut arg_vals = Vec::with_capacity(args.len());
-                for arg in args {
-                    let vals = arg.eval(s);
-                    if vals.len() != 1 {
-                        panic!("branching in call argument is not supported");
-                    }
-                    let (v, s1) = vals[0].clone();
-                    arg_vals.push(v);
-                    s = s1;
+                // Move out the callee expression once.
+                let callee_expr = *callee;
+
+                // Try builtin call first. Arguments are evaluated only if the callee
+                // is recognized as a builtin.
+                if let Some(res) = try_eval_builtin_call(state.clone(), &callee_expr, args.clone())
+                {
+                    return res;
                 }
 
-                // Builtin scalar methods like `field.inverse()`.
-                if let Expr::Field { base, name, .. } = callee.as_ref() {
-                    if let Some(base_ty) = s.ctx.infer_expr_type(base.as_ref()) {
-                        if let Ok(PathKind::Builtin) = s.ctx.classify_type(&base_ty) {
-                            return eval_builtin_method_call(
-                                s,
-                                *base.clone(),
-                                &base_ty,
-                                name.as_str(),
-                                arg_vals,
-                            );
-                        }
-                    }
+                // Regular function or method call with type-directed parameter binding.
+                let results = eval_regular_call(state, callee_expr, args);
+                if results.is_empty() {
+                    panic!("expression-level call produced no successor states");
                 }
 
-                // Regular functions and struct methods.
-                let (fid, receiver_info) = resolve_callee_expr(&s, &callee);
-
-                let func = s
-                    .ctx
-                    .func_def(fid)
-                    .cloned()
-                    .unwrap_or_else(|| panic!("missing function body for id {}", fid));
-
-                let mut callee_state = s.clone();
-                callee_state.status = ExecStatus::Step;
-
-                let mut arg_iter = arg_vals.into_iter();
-                let mut self_binding: Option<(i64, i64)> = None; // (caller_vid, callee_vid)
-
-                for p in &func.params {
-                    match p {
-                        Param::SelfParam { id } => {
-                            let callee_vid =
-                                id.expect("self parameter id must be assigned during resolve");
-
-                            let (caller_vid, struct_id) = receiver_info
-                                .unwrap_or_else(|| panic!("self parameter without receiver"));
-
-                            let recv_node = callee_state
-                                .store
-                                .get(caller_vid)
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "receiver variable id {} (struct_id={}) not found in store",
-                                        caller_vid, struct_id
-                                    )
-                                });
-
-                            callee_state.store =
-                                callee_state.store.clone().set(callee_vid, recv_node);
-                            self_binding = Some((caller_vid, callee_vid));
-                        }
-
-                        Param::Typed { id, ty, .. } => {
-                            let callee_vid =
-                                id.expect("parameter id must be assigned during resolve");
-                            let value = arg_iter
-                                .next()
-                                .unwrap_or_else(|| panic!("insufficient arguments in call"));
-
-                            if !ty.is_scalar(&callee_state.ctx) {
-                                panic!(
-                                    "non-scalar parameter types in calls are not yet supported: `{:?}`",
-                                    ty
-                                );
-                            }
-
-                            callee_state.store = callee_state
-                                .store
-                                .clone()
-                                .set(callee_vid, StoreNode::Scalar(value));
-                        }
-                    }
+                let mut out: Vector<(SymExpr, SymState)> = Vector::new();
+                for (ret_opt, s_end) in results {
+                    let ret = ret_opt
+                        .unwrap_or_else(|| panic!("void-returning function used in expression"));
+                    out.push_back((ret, s_end));
                 }
 
-                if arg_iter.next().is_some() {
-                    panic!("too many arguments supplied to call");
-                }
-
-                let results = func.clone().execute(callee_state);
-                if results.len() != 1 {
-                    panic!("branching in expression-level call is not supported");
-                }
-                let (ret_opt, mut s_end) = results[0].clone();
-
-                if let Some((caller_vid, callee_vid)) = self_binding {
-                    let node = s_end.store.get(callee_vid).cloned().unwrap_or_else(|| {
-                        panic!(
-                            "callee `self` binding id {} not found in final store",
-                            callee_vid
-                        )
-                    });
-                    s_end.store = s_end.store.clone().set(caller_vid, node);
-                }
-
-                let ret =
-                    ret_opt.unwrap_or_else(|| panic!("void-returning function used in expression"));
-
-                s_end.status = ExecStatus::Step;
-
-                Vector::unit((ret, s_end))
+                out
             }
         }
     }
@@ -948,62 +925,293 @@ fn lvalue_to_expr(lv: &LValue) -> Expr {
     e
 }
 
-/// Resolves a callee expression in either statement or expression position.
-///
-/// Returns the function identifier and, for method calls, the pair
-/// `(receiver_vid, struct_id)` describing the receiver variable and its type.
-fn resolve_callee_expr(state: &SymState, callee: &Expr) -> (i64, Option<(i64, i64)>) {
-    match callee {
-        // Free function: f(...)
-        Expr::Path {
-            ref_id: Some(fid), ..
-        } => {
-            if state.ctx.fn_sig(*fid).is_none() {
-                panic!("callee id {} does not denote a function", fid);
+/// Evaluate call arguments sequentially and return values with the final state.
+fn eval_call_args(mut state: SymState, args: Vec<Expr>) -> (Vec<SymExpr>, SymState) {
+    let mut vals = Vec::with_capacity(args.len());
+    for arg in args {
+        let res = arg.eval(state);
+        if res.len() != 1 {
+            panic!("branching in call argument is not supported");
+        }
+        let (v, s1) = res[0].clone();
+        vals.push(v);
+        state = s1;
+    }
+    (vals, state)
+}
+/// Try to evaluate a builtin call (scalar method or free function).
+/// Arguments are evaluated as scalars only when the callee is recognized as builtin.
+fn try_eval_builtin_call(
+    state: SymState,
+    callee_expr: &Expr,
+    args: Vec<Expr>,
+) -> Option<Vector<(SymExpr, SymState)>> {
+    // Builtin scalar methods, e.g. `a.inverse()`.
+    if let Expr::Field { base, name, .. } = callee_expr {
+        if let Some(base_ty) = state.ctx.infer_expr_type(base.as_ref()) {
+            if let Ok(PathKind::Builtin) = state.ctx.classify_type(&base_ty) {
+                let (arg_vals, s_after_args) = eval_call_args(state, args);
+                return Some(eval_builtin_method_call(
+                    s_after_args,
+                    *base.clone(),
+                    &base_ty,
+                    name.as_str(),
+                    arg_vals,
+                ));
             }
-            (*fid, None)
+        }
+    }
+
+    // Free builtin functions, e.g. `to_field(x)`, `to_u32(x)`.
+    if let Expr::Path { segments, .. } = callee_expr {
+        if let Some(last) = segments.last() {
+            match last.as_str() {
+                "to_field" | "to_u32" => {
+                    let (arg_vals, s_after_args) = eval_call_args(state, args);
+                    return Some(eval_builtin_free_fn_call(
+                        s_after_args,
+                        last.as_str(),
+                        arg_vals,
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    None
+}
+
+/// Evaluate a regular function or struct method call (non-builtin).
+/// The return value is optional to support both void-returning and value-returning callees.
+fn eval_regular_call(
+    state: SymState,
+    callee_expr: Expr,
+    args: Vec<Expr>,
+) -> Vector<(Option<SymExpr>, SymState)> {
+    let (fid, receiver_place) = resolve_callee_expr(&state, &callee_expr);
+
+    let func = state
+        .ctx
+        .func_def(fid)
+        .cloned()
+        .unwrap_or_else(|| panic!("missing function body for id {}", fid));
+
+    let mut callee_state = state.clone();
+    callee_state.status = ExecStatus::Step;
+
+    // We bind arguments according to the static function signature.
+    let mut arg_iter = args.into_iter();
+    let mut self_binding: Option<(ReceiverPlace, i64)> = None;
+
+    for p in &func.params {
+        match p {
+            Param::SelfParam { id } => {
+                let callee_vid = id.expect("self parameter id must be assigned during resolve");
+
+                let place = receiver_place
+                    .clone()
+                    .unwrap_or_else(|| panic!("self parameter without receiver"));
+
+                let recv_node = load_receiver_node(&callee_state.store, &place);
+
+                callee_state.store = callee_state.store.clone().set(callee_vid, recv_node);
+                self_binding = Some((place, callee_vid));
+            }
+
+            Param::Typed { id, ty, .. } => {
+                let callee_vid = id.expect("parameter id must be assigned during resolve");
+                let arg_expr = arg_iter
+                    .next()
+                    .unwrap_or_else(|| panic!("insufficient arguments in call"));
+
+                // Scalar parameters keep the old `SymExpr`-based semantics.
+                if ty.is_scalar(&callee_state.ctx) {
+                    let vals = arg_expr.eval(callee_state);
+                    if vals.is_empty() {
+                        panic!("scalar argument evaluation produced no result",);
+                    }
+                    if vals.len() != 1 {
+                        panic!("branching in scalar argument is not supported yet");
+                    }
+                    let (v, s1) = vals[0].clone();
+                    callee_state = s1;
+                    callee_state.store = callee_state
+                        .store
+                        .clone()
+                        .set(callee_vid, StoreNode::Scalar(v));
+                } else {
+                    // Aggregate parameters (structs, arrays, etc.) are passed by copying
+                    // the corresponding store node for the argument place.
+                    let node = callee_state.query_expr_node(&arg_expr).unwrap_or_else(|| {
+                        panic!(
+                            "aggregate argument `{:?}` not found as a materialized place",
+                            arg_expr
+                        )
+                    });
+                    callee_state.store = callee_state.store.clone().set(callee_vid, node.clone());
+                }
+            }
+        }
+    }
+
+    if arg_iter.next().is_some() {
+        panic!("too many arguments supplied to call");
+    }
+
+    let results = func.clone().execute(callee_state);
+    if results.is_empty() {
+        panic!("call produced no successor states");
+    }
+
+    let mut out: Vector<(Option<SymExpr>, SymState)> = Vector::new();
+
+    for (ret_opt, mut s_end) in results {
+        // If we bound `self` via a receiver place, write back any updates.
+        if let Some((place, callee_vid)) = self_binding.clone() {
+            let node = s_end.store.get(callee_vid).cloned().unwrap_or_else(|| {
+                panic!(
+                    "callee `self` binding id {} not found in final store",
+                    callee_vid
+                )
+            });
+            s_end.store = store_receiver_node(s_end.store.clone(), &place, node);
         }
 
-        // Method call: x.m(...). The field may already be resolved to a
-        // function id or still carry only the member name.
+        s_end.status = ExecStatus::Step;
+        out.push_back((ret_opt, s_end));
+    }
+
+    out
+}
+
+/// Resolves a callee expression in either statement or expression position.
+///
+/// Returns the function identifier and, for method calls, the logical
+/// location of the receiver inside the store.
+fn resolve_callee_expr(state: &SymState, callee: &Expr) -> (i64, Option<ReceiverPlace>) {
+    match callee {
+        // Free function: f(...)
+        Expr::Path { ref_id, segments } => {
+            // If already resolved to a function id, use it.
+            if let Some(fid) = ref_id {
+                if state.ctx.fn_sig(*fid).is_some() {
+                    return (*fid, None);
+                }
+            }
+
+            // Associated method: TypeName::method(...)
+            if segments.len() >= 2 {
+                let type_name = &segments[segments.len() - 2];
+                let method_name = &segments[segments.len() - 1];
+
+                if let Some(struct_id) = state.ctx.struct_id_by_name(type_name) {
+                    let members = state.ctx.struct_members(struct_id).unwrap_or_else(|| {
+                        panic!(
+                            "missing member table for struct `{}` (id = {})",
+                            type_name, struct_id
+                        )
+                    });
+
+                    let mi = members.get(method_name).unwrap_or_else(|| {
+                        panic!(
+                            "unknown associated method `{}` on struct `{}`",
+                            method_name, type_name
+                        )
+                    });
+
+                    let fid = mi.as_func_id().unwrap_or_else(|| {
+                        panic!(
+                            "member `{}` on struct `{}` is not a method",
+                            method_name, type_name
+                        )
+                    });
+
+                    return (fid, None);
+                }
+            }
+
+            panic!(
+                "unsupported callee Path for call resolution: segments = {:?}, ref_id = {:?}",
+                segments, ref_id
+            );
+        }
+
+        // Either TypeName::method(...) or place.method(...)
         Expr::Field { base, name, ref_id } => {
-            // Infer the static type of the receiver expression.
-            let base_ty = state.ctx.infer_expr_type(base.as_ref()).unwrap_or_else(|| {
-                panic!("failed to infer static type for method receiver in call")
-            });
+            // Associated method: TypeName::method(...)
+            if let Expr::Path {
+                segments,
+                ref_id: Some(sid),
+            } = base.as_ref()
+            {
+                if let Some(last) = segments.last() {
+                    if let Some(struct_id) = state.ctx.struct_id_by_name(last) {
+                        if struct_id == *sid {
+                            // Prefer an already resolved function id.
+                            if let Some(fid) = ref_id {
+                                if state.ctx.fn_sig(*fid).is_some() {
+                                    return (*fid, None);
+                                }
+                            }
+
+                            let members =
+                                state.ctx.struct_members(struct_id).unwrap_or_else(|| {
+                                    panic!(
+                                        "missing member table for struct `{}` (id = {})",
+                                        last, struct_id
+                                    )
+                                });
+
+                            let mi = members.get(name).unwrap_or_else(|| {
+                                panic!("unknown associated method `{}` on struct `{}`", name, last)
+                            });
+
+                            let fid = mi.as_func_id().unwrap_or_else(|| {
+                                panic!("member `{}` on struct `{}` is not a method", name, last)
+                            });
+
+                            return (fid, None);
+                        }
+                    }
+                }
+            }
+
+            // Instance method: place.method(...)
+            let base_ty = state
+                .ctx
+                .infer_expr_type(base.as_ref())
+                .unwrap_or_else(|| panic!("cannot infer type for method receiver in call"));
 
             let struct_id = match state.ctx.classify_type(&base_ty) {
                 Ok(PathKind::Struct(sid)) => sid,
                 Ok(PathKind::Builtin) => {
                     panic!(
-                        "method receiver must be a struct value, got builtin type `{:?}`",
+                        "method receiver must be a struct, got builtin type `{:?}`",
                         base_ty
                     )
                 }
                 Err(e) => {
-                    panic!("method receiver has invalid type `{:?}`: {}", base_ty, e)
+                    panic!(
+                        "invalid method receiver type `{:?}` in call: {}",
+                        base_ty, e
+                    )
                 }
             };
 
-            // Restrict the receiver to be a simple variable path for now.
-            let receiver_vid = match base.as_ref() {
-                Expr::Path {
-                    ref_id: Some(vid), ..
-                } => *vid,
-                _ => panic!("method receiver must be a struct-valued variable path"),
-            };
+            let receiver_place = build_receiver_place(state, base.as_ref());
 
-            // If the field has already been resolved to a function id, prefer it.
+            // Use pre-resolved function id if available.
             if let Some(fid) = ref_id {
                 if state.ctx.fn_sig(*fid).is_some() {
-                    return (*fid, Some((receiver_vid, struct_id)));
+                    return (*fid, Some(receiver_place));
                 }
             }
 
-            // Otherwise, look up the method in the struct member table by name.
+            // Fallback to member lookup by name.
             let members = state.ctx.struct_members(struct_id).unwrap_or_else(|| {
                 panic!(
-                    "no member table recorded for struct_id {} when resolving method `{}`",
+                    "missing member table for struct_id {} when resolving method `{}`",
                     struct_id, name
                 )
             });
@@ -1019,11 +1227,236 @@ fn resolve_callee_expr(state: &SymState, callee: &Expr) -> (i64, Option<(i64, i6
                 .as_func_id()
                 .unwrap_or_else(|| panic!("member `{}` is not a method", name));
 
-            (fid, Some((receiver_vid, struct_id)))
+            (fid, Some(receiver_place))
         }
 
         _ => {
-            panic!("unsupported callee form for call resolution");
+            panic!("unsupported callee form for call resolution: {:?}", callee);
+        }
+    }
+}
+
+/// Decompose a place-like expression (path / field / index chain)
+/// into a root binding id and a sequence of concrete steps.
+fn build_receiver_place(state: &SymState, e: &Expr) -> ReceiverPlace {
+    fn go(state: &SymState, e: &Expr) -> (i64, Vec<ReceiverStep>) {
+        match e {
+            // Base case: plain variable path.
+            Expr::Path {
+                ref_id: Some(vid), ..
+            } => (*vid, Vec::new()),
+
+            // Field selection: base.field
+            Expr::Field { base, name, .. } => {
+                let (root, mut steps) = go(state, base.as_ref());
+
+                // Static type of the base struct.
+                let base_ty = state.ctx.infer_expr_type(base.as_ref()).unwrap_or_else(|| {
+                    panic!(
+                        "failed to infer type for field base in receiver: {:?}",
+                        base
+                    )
+                });
+
+                let sid = match state.ctx.classify_type(&base_ty) {
+                    Ok(PathKind::Struct(sid)) => sid,
+                    Ok(PathKind::Builtin) => {
+                        panic!(
+                            "field receiver in method call must be a struct, got builtin `{:?}`",
+                            base_ty
+                        )
+                    }
+                    Err(e) => {
+                        panic!(
+                            "invalid type for field receiver in method call `{:?}`: {}",
+                            base_ty, e
+                        )
+                    }
+                };
+
+                let fid = state.ctx.field_id_of(sid, name).unwrap_or_else(|| {
+                    panic!(
+                        "unknown field `{}` on struct_id {} in method receiver",
+                        name, sid
+                    )
+                });
+
+                steps.push(ReceiverStep::Field(fid));
+                (root, steps)
+            }
+
+            // Index selection: base[idx]
+            Expr::Index(base, idx) => {
+                let (root, mut steps) = go(state, base.as_ref());
+                let idx_val = eval_index_const_or_err(&state.ctx, Some(&state.store), idx)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "array index in method receiver must be a concrete integer: `{:?}`",
+                            idx
+                        )
+                    });
+                steps.push(ReceiverStep::Index(idx_val));
+                (root, steps)
+            }
+
+            _ => {
+                panic!(
+                    "method receiver must be a place expression (path/field/index chain), got `{:?}`",
+                    e
+                );
+            }
+        }
+    }
+
+    let (root_vid, steps) = go(state, e);
+    ReceiverPlace { root_vid, steps }
+}
+
+/// Load the store node at the receiver place.
+fn load_receiver_node(store: &Store, place: &ReceiverPlace) -> StoreNode {
+    let mut node = store.get(place.root_vid).cloned().unwrap_or_else(|| {
+        panic!(
+            "receiver root variable id {} not found in store",
+            place.root_vid
+        )
+    });
+
+    for step in &place.steps {
+        match (step, &node) {
+            (ReceiverStep::Field(fid), StoreNode::Struct { fields }) => {
+                let child = fields.get(fid).unwrap_or_else(|| {
+                    panic!(
+                        "receiver struct missing field id {} while loading receiver",
+                        fid
+                    )
+                });
+                node = child.clone();
+            }
+            (ReceiverStep::Index(i), StoreNode::Array { len, elems }) => {
+                if let Some(l) = len {
+                    if *i >= *l {
+                        panic!(
+                            "receiver array index {} out of bounds (len = {}) while loading",
+                            i, l
+                        );
+                    }
+                }
+                let child = elems.get(i).unwrap_or_else(|| {
+                    panic!(
+                        "receiver array element {} uninitialized while loading receiver",
+                        i
+                    )
+                });
+                node = child.clone();
+            }
+            (step, bad) => {
+                panic!(
+                    "receiver place shape mismatch while loading: step {:?} on node {:?}",
+                    step, bad
+                );
+            }
+        }
+    }
+
+    node
+}
+
+/// Write back an updated node to the receiver place.
+fn store_receiver_node(store: Store, place: &ReceiverPlace, new_node: StoreNode) -> Store {
+    fn write_rec(cur: StoreNode, steps: &[ReceiverStep], leaf: &StoreNode) -> StoreNode {
+        if steps.is_empty() {
+            return leaf.clone();
+        }
+
+        match (&steps[0], cur) {
+            (ReceiverStep::Field(fid), StoreNode::Struct { fields }) => {
+                let child = fields.get(fid).cloned().unwrap_or_else(|| {
+                    panic!(
+                        "receiver struct missing field id {} while writing back",
+                        fid
+                    )
+                });
+                let updated_child = write_rec(child, &steps[1..], leaf);
+                let new_fields = fields.update(*fid, updated_child);
+                StoreNode::Struct { fields: new_fields }
+            }
+
+            (ReceiverStep::Index(i), StoreNode::Array { len, elems }) => {
+                let child = elems.get(i).cloned().unwrap_or_else(|| {
+                    panic!(
+                        "receiver array element {} uninitialized while writing back",
+                        i
+                    )
+                });
+                let updated_child = write_rec(child, &steps[1..], leaf);
+                let new_elems = elems.update(*i, updated_child);
+                StoreNode::Array {
+                    len,
+                    elems: new_elems,
+                }
+            }
+
+            (step, bad) => {
+                panic!(
+                    "receiver place shape mismatch while writing back: step {:?} on node {:?}",
+                    step, bad
+                );
+            }
+        }
+    }
+
+    let root = store.get(place.root_vid).cloned().unwrap_or_else(|| {
+        panic!(
+            "receiver root variable id {} not found when writing back",
+            place.root_vid
+        )
+    });
+
+    let updated_root = write_rec(root, &place.steps, &new_node);
+    store.set(place.root_vid, updated_root)
+}
+
+/// Evaluate a builtin free function like `to_field(x)` or `to_u32(x)`.
+fn eval_builtin_free_fn_call(
+    mut state: SymState,
+    name: &str,
+    mut arg_vals: Vec<SymExpr>,
+) -> Vector<(SymExpr, SymState)> {
+    match name {
+        "to_field" => {
+            if arg_vals.len() != 1 {
+                panic!("`to_field` expects exactly one argument");
+            }
+            let src = arg_vals.remove(0);
+
+            // Fresh field-typed variable as the result.
+            let res = state.fresh_sym("to_field", SymType::F);
+
+            // Connect the new field symbol with the source value.
+            let eq = res.clone().eq_to(src);
+            state = state.with_pc(eq);
+
+            Vector::unit((res, state))
+        }
+
+        "to_u32" => {
+            if arg_vals.len() != 1 {
+                panic!("`to_u32` expects exactly one argument");
+            }
+            let src = arg_vals.remove(0);
+
+            // Fresh 32-bit unsigned integer as the result.
+            let res = state.fresh_sym("to_u32", SymType::Uint(32));
+
+            // Connect the new u32 symbol with the source value (0/1-encoded bool in practice).
+            let eq = res.clone().eq_to(src);
+            state = state.with_pc(eq);
+
+            Vector::unit((res, state))
+        }
+
+        other => {
+            panic!("unsupported builtin free function `{}`", other);
         }
     }
 }

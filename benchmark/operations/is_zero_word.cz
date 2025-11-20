@@ -13,14 +13,10 @@ Struct IsZeroWordOperation{
 }
 
 Component IsZeroWordOperation{
-    Computation populate(self, a_u32: u32) -> u32{
-        return self.populate_from_field_element(to_word(a_u32));
-    }
-
-    Computation populate_from_field_element(self, a: Word) -> u32 {
+    Computation populate(self,  a: [F; WORD_SIZE]) -> u32{
         bool is_zero = true;
         for i in 0..WORD_SIZE {
-            is_zero &= self.is_zero_byte[i].populate_from_field_element(a[i]) == 1;
+            is_zero &= self.is_zero_byte[i].populate(a[i]) == 1;
         }
         self.is_lower_half_zero = self.is_zero_byte[0].result * self.is_zero_byte[1].result;
         self.is_upper_half_zero = self.is_zero_byte[2].result * self.is_zero_byte[3].result;
@@ -28,7 +24,7 @@ Component IsZeroWordOperation{
         return to_u32(is_zero);
     }
 
-    Constraint eval(a: Word, cols: IsZeroWordOperation, is_real: Selector){
+    Constraint eval(a: [F; WORD_SIZE], cols: IsZeroWordOperation, is_real: Selector){
         for i in 0..WORD_SIZE {
             IsZeroOperation::eval(
                 a[i],
@@ -51,5 +47,5 @@ Component IsZeroWordOperation{
         assert_eq(cols.result, cols.is_lower_half_zero * cols.is_upper_half_zero);
     }
 
-    Query(populate,self;eval,cols)
+    Query(populate,self,a;eval,cols,a)
 }

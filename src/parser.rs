@@ -547,8 +547,16 @@ fn parse_expr(p: Pair<Rule>) -> Result<Expr> {
                     ));
                 }
 
+                // Map token text to BinOp.
                 let bin_op = match op_pair.as_str() {
                     "==" => BinOp::Eq,
+                    "!=" => BinOp::Ne,
+                    "<" => BinOp::Lt,
+                    "<=" => BinOp::Le,
+                    ">" => BinOp::Gt,
+                    ">=" => BinOp::Ge,
+                    "&&" => BinOp::And,
+                    "||" => BinOp::Or,
                     "*" => BinOp::Mul,
                     "+" => BinOp::Add,
                     "-" => BinOp::Sub,
@@ -663,14 +671,15 @@ fn parse_postfix(p: Pair<Rule>) -> Result<Expr> {
     Ok(e)
 }
 
-/// Precedence table for binary operators.
-/// Larger value means higher precedence.
+/// Return precedence of a binary operator (larger is tighter).
 fn binop_precedence(op: &BinOp) -> u8 {
     match op {
-        BinOp::Mul => 3,
-        BinOp::Add | BinOp::Sub => 2,
-        BinOp::BitAnd => 1,
-        BinOp::Eq => 0,
+        BinOp::Mul => 5,
+        BinOp::Add | BinOp::Sub => 4,
+        BinOp::BitAnd => 3,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => 2,
+        BinOp::And => 1,
+        BinOp::Or => 0,
     }
 }
 

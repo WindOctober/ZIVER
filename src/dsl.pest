@@ -82,7 +82,7 @@ return_stmt = { "return" ~ expr ~ ";" }
 // === Expressions ===
 // Expressions are defined in a simplified form, real precedence is handled in Rust.
 expr = { postfix ~ ( op ~ postfix )* }
-op   = { "==" | "*" | "+" | "-" | "&" }
+op   = { "&&" | "||" | "==" | "!=" | "<=" | ">=" | "<" | ">" | "&" | "*" | "+" | "-" }
 
 postfix  = { primary ~ ( call_tail | index_tail | field_tail )* }
 primary  = { int | bool | path | "(" ~ expr ~ ")" }

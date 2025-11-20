@@ -271,44 +271,12 @@ impl SymState {
         }
     }
 
-    /// Map an AST type to a symbolic sort for variable creation.
-    /// Only builtin scalars are mappable; structs/arrays/functions are not.
+    /// Map an AST type to a symbolic scalar sort using Context's builtin mapping.
+    /// Only builtin scalars are mappable; structs/arrays/functions are rejected.
     pub fn type_map(&self, ty: &Type) -> Result<SymType, String> {
-        match self.ctx.classify_type(ty) {
-            Ok(PathKind::Builtin) => {
-                // Parse terminal name: "bool" | "field" | "uN" | "iN".
-                let Type::Path { segments, .. } = ty else {
-                    unreachable!("classify_type returned Builtin for non-Path");
-                };
-                let last = segments
-                    .last()
-                    .expect("non-empty path")
-                    .to_ascii_lowercase();
-                if last == "bool" {
-                    return Ok(SymType::Bool);
-                }
-                if last == "field" || last == "f" {
-                    return Ok(SymType::F);
-                }
-                if let Some(bits) = last.strip_prefix('u') {
-                    let w = bits
-                        .parse::<usize>()
-                        .map_err(|_| format!("invalid uint width in type name: {}", last))?;
-                    return Ok(SymType::Uint(w));
-                }
-                if let Some(bits) = last.strip_prefix('i') {
-                    let w = bits
-                        .parse::<usize>()
-                        .map_err(|_| format!("invalid int width in type name: {}", last))?;
-                    return Ok(SymType::Int(w));
-                }
-                Err(format!("unknown builtin type name: {}", last))
-            }
-            Ok(PathKind::Struct(_sid)) => {
-                // Composite types do not map to a scalar sort.
-                Err("cannot map struct type to SymType".to_string())
-            }
-            Err(e) => Err(e),
+        match self.ctx.builtin_type_to_sym_type(ty) {
+            Some(sty) => Ok(sty),
+            None => Err(format!("cannot map type `{:?}` to SymType", ty)),
         }
     }
 
@@ -414,12 +382,28 @@ impl SymState {
                     }
                 }
             }
-
             Type::Array(inner, len_expr) => {
-                // Length must be constant at runtime for indexing; unknown is allowed at allocation.
+                // Try to resolve the array length at allocation time.
                 let len: Option<usize> = eval_index_const_or_err(&self.ctx, None, len_expr);
-                let _ = &**inner; // elements are lazily materialized upon indexed writes/reads
-                StoreNode::array(len)
+
+                match len {
+                    // Known length: eagerly materialize each element.
+                    Some(n) => {
+                        let mut elems = IMap::new();
+                        for i in 0..n {
+                            let child = self.alloc_node_for_type(&format!("{hint}_{i}"), inner);
+                            elems.insert(i, child);
+                        }
+                        StoreNode::Array {
+                            len: Some(n),
+                            elems,
+                        }
+                    }
+
+                    // Unknown length: keep an empty array shell; any indexed access
+                    // with constant index will still panic if element was never written.
+                    None => StoreNode::array(None),
+                }
             }
 
             // Function types are not allowed in value allocation; report as unimplemented.

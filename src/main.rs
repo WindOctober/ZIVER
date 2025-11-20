@@ -42,7 +42,7 @@ fn main() {
     // Require a path to resolve imports on disk.
     let entry_path = args.input.unwrap_or_else(|| {
         // your default: benchmark/operations/is_zero_word.cz
-        std::path::PathBuf::from("benchmark/operations/is_zero.cz")
+        std::path::PathBuf::from("benchmark/operations/is_zero_word.cz")
     });
 
     // Resolve and parse the entry + imports.

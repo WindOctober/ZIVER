@@ -186,11 +186,24 @@ pub enum Expr {
     Paren(Box<Expr>),
 }
 
+/// Binary operators in the DSL.
 #[derive(Debug, Clone, Copy)]
 pub enum BinOp {
+    // Comparisons
     Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+
+    // Arithmetic
     Mul,
     Add,
     Sub,
+
+    // Bitwise and logical
     BitAnd,
+    And, // &&
+    Or,  // ||
 }
