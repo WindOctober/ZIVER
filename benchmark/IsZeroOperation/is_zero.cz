@@ -1,0 +1,29 @@
+// crates/core/machine/src/operations/is_zero.rs
+Struct IsZeroOperation {
+  input inverse: field,
+  output result: field,
+}
+
+Component IsZeroOperation {
+  Computation populate(self, input a: field) -> field {
+    if a == 0 {
+      self.inverse = 0;
+      self.result = 1;
+    } else {
+      self.inverse = a.inverse();
+      self.result = 0;
+    }
+    return self.result;
+  }
+
+  Constraint eval(input a: field,cols:IsZeroOperation, is_real: field) {
+    assert_bool(cols.result);
+
+    field one = 1;
+    field is_zero = one - cols.inverse * a;
+    assert_eq(is_zero , cols.result);
+
+    assert_eq(cols.result * a, 0);
+  }
+  Query(populate,self,a;eval,cols,a)
+}
