@@ -2,7 +2,6 @@ pub mod ast;
 mod checker;
 pub mod parser;
 mod utils;
-
 use clap::{ArgAction, Parser};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -17,22 +16,34 @@ use crate::utils::module_resolver::resolve_and_parse_modules;
 #[command(
     name = "czc",
     version,
-    about = "Parse a CZ DSL file and optionally pretty-print its AST."
+    about = "Parse a CZ DSL file and run equivalence checking."
 )]
-struct Args {
+pub struct Args {
     /// Path to the input `.cz` file. Defaults to a benchmark file if omitted.
     #[arg(value_name = "PATH")]
-    input: Option<PathBuf>,
+    pub input: Option<PathBuf>,
 
     /// Print the parsed AST to stdout in a pretty format.
     #[arg(long, action = ArgAction::SetTrue)]
-    ast: bool,
+    pub ast: bool,
 
-    /// Enables the optimization of *type-based modular arithmetic simplification* (enabled by default).
-    /// Use `--no-type-opt` to disable this optimization, which is useful for conducting ablation studies.
-    #[arg(long = "no-type-opt", alias = "disable-type-opt",
-          action = ArgAction::SetFalse, default_value_t = true)]
-    type_opt: bool,
+    /// Enables the optimization of type-based modular arithmetic simplification (enabled by default).
+    /// Use `--no-type-opt` to disable this optimization.
+    #[arg(
+        long = "no-type-opt",
+        alias = "disable-type-opt",
+        action = ArgAction::SetFalse,
+        default_value_t = true
+    )]
+    pub type_opt: bool,
+
+    /// Select SMT solver backend: "z3_nia" or "cvc5_ff".
+    #[arg(long, value_name = "SOLVER", default_value = "cvc5_ff")]
+    pub solver: String,
+
+    /// Command or path used to invoke cvc5 when `--solver cvc5_ff` is selected.
+    #[arg(long, value_name = "CMD", default_value = "cvc5")]
+    pub cvc5_cmd: String,
 }
 
 fn main() {
@@ -40,10 +51,9 @@ fn main() {
     let config = derive_config(args.clone());
 
     // Require a path to resolve imports on disk.
-    let entry_path = args.input.unwrap_or_else(|| {
-        // your default: benchmark/operations/is_zero_word.cz
-        std::path::PathBuf::from("benchmark/operations/is_zero_word.cz")
-    });
+    let entry_path = args
+        .input
+        .unwrap_or_else(|| PathBuf::from("benchmark/IsZeroWordOperation/is_zero_word.cz"));
 
     // Resolve and parse the entry + imports.
     let mut modules =

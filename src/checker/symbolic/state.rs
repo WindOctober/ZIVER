@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::ast::*;
 use crate::checker::symbolic::context::{Context, PathKind};
 use crate::checker::symbolic::eval_index_const_or_err;
-use crate::checker::symbolic::expr::{BoolExpr, FIELD_MODULUS, SymExpr, SymType};
+use crate::checker::symbolic::expr::{BoolExpr, SymExpr, SymType};
 
 /// Persistent store node for symbolic memory.
 #[derive(Clone, Debug)]
@@ -227,10 +227,84 @@ impl SymState {
 
     /// Returns `true` if the given AST expression has field sort.
     pub fn is_field_expr(&self, e: &Expr) -> bool {
-        if let Some(ty) = self.ctx.infer_expr_type(e) {
+        if let Some(ty) = self.infer_expr_type(e) {
             matches!(self.type_map(&ty), Ok(SymType::F))
         } else {
             false
+        }
+    }
+
+    /// Tries to infer expression type using dynamic store information first,
+    /// then falls back to static context-based inference.
+    pub fn infer_expr_type(&self, e: &Expr) -> Option<Type> {
+        // Prefer dynamic sort from a materialized scalar node.
+        if let Some(node) = self.query_expr_node(e) {
+            if let StoreNode::Scalar(se) = node {
+                if let Some(sty) = Self::symexpr_sort(se) {
+                    return Some(self.ctx.sym_type_to_builtin_type(&sty));
+                }
+            }
+        }
+
+        // Fallback to static inference on ids and builtin types.
+        self.ctx.infer_expr_type_static(e)
+    }
+
+    /// Returns the symbolic sort for simple scalar expressions.
+    fn symexpr_sort(se: &SymExpr) -> Option<SymType> {
+        match se {
+            SymExpr::Var(_, sty) => Some(sty.clone()),
+            SymExpr::Int(k) => {
+                if *k < 0 {
+                    // Signed literals: pick a small signed width if possible.
+                    if *k >= i32::MIN as i128 {
+                        Some(SymType::Int(32))
+                    } else {
+                        Some(SymType::Int(64))
+                    }
+                } else {
+                    let v = *k as u128;
+                    // 0/1 as Bool.
+                    if v <= 1 {
+                        Some(SymType::Bool)
+                    } else if v <= 3 {
+                        // 2..=3
+                        Some(SymType::Uint(2))
+                    } else if v <= 15 {
+                        Some(SymType::Uint(4))
+                    } else if v <= 255 {
+                        Some(SymType::Uint(8))
+                    } else if v <= 65_535 {
+                        Some(SymType::Uint(16))
+                    } else if v <= u32::MAX as u128 {
+                        // Up to u32 range use uint(32).
+                        Some(SymType::Uint(32))
+                    } else {
+                        // Larger constants fall back to uint(64).
+                        Some(SymType::Uint(64))
+                    }
+                }
+            }
+            SymExpr::Ite(_, t, f) => {
+                // Simple join: require both branches to have the same sort.
+                let st = Self::symexpr_sort(t)?;
+                let sf = Self::symexpr_sort(f)?;
+                if st == sf { Some(st) } else { None }
+            }
+            SymExpr::Mul(vs) => {
+                // Very conservative: if all factors share the same sort, keep it; else None.
+                let mut it = vs.iter();
+                let first = it.next()?;
+                let s0 = Self::symexpr_sort(first)?;
+                for x in it {
+                    if Self::symexpr_sort(x)? != s0 {
+                        return None;
+                    }
+                }
+                Some(s0)
+            }
+            // Extend as needed for other constructors.
+            _ => None,
         }
     }
 
@@ -241,7 +315,7 @@ impl SymState {
                 self.store.get(vid)
             }
             Expr::Field { base, name, .. } => {
-                let sid = match self.ctx.infer_expr_type(base.as_ref()) {
+                let sid = match self.infer_expr_type(base.as_ref()) {
                     Some(Type::Path {
                         ref_id: Some(sid), ..
                     }) => sid,
@@ -283,19 +357,8 @@ impl SymState {
     pub fn fresh_sym(&mut self, hint: &str, ty: SymType) -> SymExpr {
         let id = self.fresh;
         self.fresh += 1;
-        let v = SymExpr::Var(format!("{}_{}", hint, id), ty.clone());
-
-        // For field-typed symbols, constrain them to the canonical range [0, p).
-        if let SymType::F = ty {
-            let zero = SymExpr::Int(0);
-            let p = SymExpr::Int(FIELD_MODULUS);
-            // 0 <= v
-            self.path_cond.push(zero.le(v.clone()));
-            // v < p
-            self.path_cond.push(v.clone().lt(p));
-        }
-
-        v
+        // Solver backends are responsible for range constraints based on SymType.
+        SymExpr::Var(format!("{}_{}", hint, id), ty)
     }
 
     /// Initializes parameters with fresh symbols.

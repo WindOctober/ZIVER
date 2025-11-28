@@ -5,9 +5,10 @@ use crate::{
     checker::symbolic::{
         context::{Context, PathKind},
         eval_index_const_or_err,
-        expr::{BoolExpr, SymExpr, SymType},
+        expr::{BoolExpr, FIELD_MODULUS, SymExpr, SymType},
         state::{ExecStatus, Store, StoreNode, SymState},
     },
+    utils::SolverKind,
 };
 
 /// Logical place of a method receiver inside the store:
@@ -148,12 +149,7 @@ impl SymbolicExecutor for Member {
 }
 
 impl SymbolicExecutor for Func {
-    fn execute(self, mut state: SymState) -> Vector<(Option<SymExpr>, SymState)> {
-        // Initialize parameters; materialize `self` if method.
-        let fid = self.id.expect("function id must be set");
-        let self_struct_id = state.ctx.method_owner(fid);
-        state.init_params_for_func(&self, self_struct_id);
-
+    fn execute(self, state: SymState) -> Vector<(Option<SymExpr>, SymState)> {
         // Start with one live state
         let mut live: Vector<SymState> = Vector::unit(state);
         let mut terminals: Vector<(Option<SymExpr>, SymState)> = Vector::new();
@@ -298,10 +294,16 @@ impl SymbolicExecutor for Stmt {
                 if lb.len() != 1 {
                     panic!("branching in AssertEq(rhs) unsupported");
                 }
-                let (bv, mut s2) = lb[0].clone();
+                let (bv, s2) = lb[0].clone();
 
-                s2 = s2.with_pc(av.eq_to(bv));
-                Vector::unit((None, s2))
+                let cond = av.eq_to(bv);
+                let states = Self::split_on_bool_mul_eq_zero(s2, cond);
+
+                let mut out = Vector::new();
+                for s in states {
+                    out.push_back((None, s));
+                }
+                out
             }
 
             Stmt::AssertBool(e) => {
@@ -326,20 +328,22 @@ impl SymbolicExecutor for Stmt {
                     return Vector::unit((None, s2));
                 }
 
-                // Lvalue-like expressions: constrain value to be 0 or 1.
-                match e {
+                // Lvalue-like expressions: path / field / index chain.
+                match &e {
                     Expr::Path { .. } | Expr::Field { .. } | Expr::Index(..) => {
-                        let vals = e.eval(st);
+                        let vals = e.clone().eval(st);
                         if vals.len() != 1 {
                             panic!("branching in AssertBool(lvalue) is unsupported");
                         }
                         let (v, s1) = vals[0].clone();
+                        // Other lvalues are constrained to be 0/1.
                         let zero = SymExpr::Int(0);
                         let one = SymExpr::Int(1);
                         let guard = BoolExpr::or(vec![v.clone().eq_to(zero), v.eq_to(one)]);
                         let s2 = s1.with_pc(guard);
                         Vector::unit((None, s2))
                     }
+
                     other => {
                         panic!(
                             "unsupported Boolean expression in AssertBool: `{:?}`",
@@ -621,6 +625,77 @@ impl SymbolicExecutor for Stmt {
     }
 }
 
+impl Stmt {
+    /// Splits on constraints of the form b * rest == 0 with a single Bool factor.
+    fn split_on_bool_mul_eq_zero(state: SymState, cond: BoolExpr) -> Vector<SymState> {
+        fn extract_bool_factor(lhs: SymExpr, rhs: SymExpr) -> Option<(SymExpr, SymExpr)> {
+            fn handle_product(prod: SymExpr) -> Option<(SymExpr, SymExpr)> {
+                let factors = match prod {
+                    SymExpr::Mul(vs) => vs,
+                    _ => return None,
+                };
+
+                let mut bool_idx: Option<usize> = None;
+                for (i, f) in factors.iter().enumerate() {
+                    if let SymExpr::Var(_, SymType::Bool) = f {
+                        if bool_idx.is_some() {
+                            return None;
+                        }
+                        bool_idx = Some(i);
+                    }
+                }
+                let idx = bool_idx?;
+
+                let mut rest = Vec::new();
+                let mut bool_factor: Option<SymExpr> = None;
+                for (i, f) in factors.into_iter().enumerate() {
+                    if i == idx {
+                        bool_factor = Some(f);
+                    } else {
+                        rest.push(f);
+                    }
+                }
+
+                let b = bool_factor?;
+                let rest_expr = match rest.len() {
+                    0 => SymExpr::Int(1),
+                    1 => rest.into_iter().next().unwrap(),
+                    _ => SymExpr::Mul(rest),
+                };
+                Some((b, rest_expr))
+            }
+
+            match (lhs.clone(), rhs.clone()) {
+                (SymExpr::Mul(_), SymExpr::Int(0)) => handle_product(lhs),
+                (SymExpr::Int(0), SymExpr::Mul(_)) => handle_product(rhs),
+                _ => None,
+            }
+        }
+
+        match cond.clone() {
+            BoolExpr::Eq(lhs, rhs) => {
+                if let Some((bool_var, rest)) = extract_bool_factor(lhs, rhs) {
+                    let zero = SymExpr::Int(0);
+                    let one = SymExpr::Int(1);
+
+                    let cond_b0 = bool_var.clone().eq_to(zero.clone());
+                    let cond_b1 = bool_var.eq_to(one);
+                    let cond_r0 = rest.eq_to(zero);
+
+                    let mut out = Vector::new();
+                    let s1 = state.clone().with_pc(cond_b0);
+                    out.push_back(s1);
+                    let s2 = state.with_pc(cond_b1).with_pc(cond_r0);
+                    out.push_back(s2);
+                    return out;
+                }
+            }
+            _ => {}
+        }
+
+        Vector::unit(state.with_pc(cond))
+    }
+}
 impl Expr {
     pub fn eval(self, state: SymState) -> Vector<(SymExpr, SymState)> {
         /// Sequential binary eval helper that allows branching on both sides.
@@ -684,7 +759,7 @@ impl Expr {
             }
 
             Expr::Field { base, name, .. } => {
-                let sid = match state.ctx.infer_expr_type(base.as_ref()) {
+                let sid = match state.infer_expr_type(base.as_ref()) {
                     Some(Type::Path {
                         ref_id: Some(sid), ..
                     }) => sid,
@@ -776,14 +851,33 @@ impl Expr {
                 lhs,
                 rhs,
             } => {
-                // Field multiplication is reduced modulo the field prime.
                 let bin = Expr::Binary {
                     op: BinOp::Mul,
                     lhs: lhs.clone(),
                     rhs: rhs.clone(),
                 };
+
                 if state.is_field_expr(&bin) {
-                    eval_bin("Mul", *lhs, *rhs, state, |a, b| (a * b).mod_field())
+                    let lhs_ty = state.infer_expr_type(lhs.as_ref());
+                    let rhs_ty = state.infer_expr_type(rhs.as_ref());
+
+                    let use_mod = match (lhs_ty, rhs_ty) {
+                        (Some(lt), Some(rt)) => {
+                            let sty_l = state.type_map(&lt).ok();
+                            let sty_r = state.type_map(&rt).ok();
+                            match (sty_l, sty_r) {
+                                (Some(sl), Some(sr)) => !Self::product_safe_without_mod(&sl, &sr),
+                                _ => true,
+                            }
+                        }
+                        _ => true,
+                    };
+
+                    if use_mod {
+                        eval_bin("Mul", *lhs, *rhs, state, |a, b| (a * b).mod_field())
+                    } else {
+                        eval_bin("Mul", *lhs, *rhs, state, |a, b| a * b)
+                    }
                 } else {
                     eval_bin("Mul", *lhs, *rhs, state, |a, b| a * b)
                 }
@@ -901,6 +995,47 @@ impl Expr {
             }
         }
     }
+
+    /// Returns an upper bound on |v| for the given symbolic type.
+    fn symtype_max_abs(st: &SymType) -> Option<i128> {
+        match st {
+            SymType::Bool => Some(1),
+            SymType::Uint(w) => {
+                if *w >= 63 {
+                    return None;
+                }
+                Some((1_i128 << w) - 1)
+            }
+            SymType::Int(w) => {
+                if *w == 0 || *w >= 62 {
+                    return None;
+                }
+                Some(1_i128 << (w - 1))
+            }
+            SymType::F => Some(FIELD_MODULUS - 1),
+        }
+    }
+
+    /// Returns true if lhs * rhs cannot overflow the field range [0, p).
+    fn product_safe_without_mod(lhs: &SymType, rhs: &SymType) -> bool {
+        let max_l = match Self::symtype_max_abs(lhs) {
+            Some(v) if v >= 0 => v,
+            _ => return false,
+        };
+        let max_r = match Self::symtype_max_abs(rhs) {
+            Some(v) if v >= 0 => v,
+            _ => return false,
+        };
+
+        if max_l == 0 || max_r == 0 {
+            return true;
+        }
+
+        match max_l.checked_mul(max_r) {
+            Some(prod) => prod < FIELD_MODULUS,
+            None => false,
+        }
+    }
 }
 
 fn lvalue_to_expr(lv: &LValue) -> Expr {
@@ -939,6 +1074,7 @@ fn eval_call_args(mut state: SymState, args: Vec<Expr>) -> (Vec<SymExpr>, SymSta
     }
     (vals, state)
 }
+
 /// Try to evaluate a builtin call (scalar method or free function).
 /// Arguments are evaluated as scalars only when the callee is recognized as builtin.
 fn try_eval_builtin_call(
@@ -948,7 +1084,7 @@ fn try_eval_builtin_call(
 ) -> Option<Vector<(SymExpr, SymState)>> {
     // Builtin scalar methods, e.g. `a.inverse()`.
     if let Expr::Field { base, name, .. } = callee_expr {
-        if let Some(base_ty) = state.ctx.infer_expr_type(base.as_ref()) {
+        if let Some(base_ty) = state.infer_expr_type(base.as_ref()) {
             if let Ok(PathKind::Builtin) = state.ctx.classify_type(&base_ty) {
                 let (arg_vals, s_after_args) = eval_call_args(state, args);
                 return Some(eval_builtin_method_call(
@@ -962,15 +1098,16 @@ fn try_eval_builtin_call(
         }
     }
 
-    // Free builtin functions, e.g. `to_field(x)`, `to_u32(x)`.
+    // Free builtin functions, e.g. `to_field(x)`, `to_u32(x)`, `to_word(x)`.
     if let Expr::Path { segments, .. } = callee_expr {
         if let Some(last) = segments.last() {
             match last.as_str() {
-                "to_field" | "to_u32" => {
-                    let (arg_vals, s_after_args) = eval_call_args(state, args);
+                "to_field" | "to_u32" | "to_word" => {
+                    let (arg_vals, s_after_args) = eval_call_args(state, args.clone());
                     return Some(eval_builtin_free_fn_call(
                         s_after_args,
                         last.as_str(),
+                        args,
                         arg_vals,
                     ));
                 }
@@ -1179,7 +1316,6 @@ fn resolve_callee_expr(state: &SymState, callee: &Expr) -> (i64, Option<Receiver
 
             // Instance method: place.method(...)
             let base_ty = state
-                .ctx
                 .infer_expr_type(base.as_ref())
                 .unwrap_or_else(|| panic!("cannot infer type for method receiver in call"));
 
@@ -1251,7 +1387,7 @@ fn build_receiver_place(state: &SymState, e: &Expr) -> ReceiverPlace {
                 let (root, mut steps) = go(state, base.as_ref());
 
                 // Static type of the base struct.
-                let base_ty = state.ctx.infer_expr_type(base.as_ref()).unwrap_or_else(|| {
+                let base_ty = state.infer_expr_type(base.as_ref()).unwrap_or_else(|| {
                     panic!(
                         "failed to infer type for field base in receiver: {:?}",
                         base
@@ -1416,10 +1552,10 @@ fn store_receiver_node(store: Store, place: &ReceiverPlace, new_node: StoreNode)
     store.set(place.root_vid, updated_root)
 }
 
-/// Evaluate a builtin free function like `to_field(x)` or `to_u32(x)`.
 fn eval_builtin_free_fn_call(
     mut state: SymState,
     name: &str,
+    mut orig_args: Vec<Expr>,
     mut arg_vals: Vec<SymExpr>,
 ) -> Vector<(SymExpr, SymState)> {
     match name {
@@ -1429,10 +1565,7 @@ fn eval_builtin_free_fn_call(
             }
             let src = arg_vals.remove(0);
 
-            // Fresh field-typed variable as the result.
             let res = state.fresh_sym("to_field", SymType::F);
-
-            // Connect the new field symbol with the source value.
             let eq = res.clone().eq_to(src);
             state = state.with_pc(eq);
 
@@ -1440,19 +1573,119 @@ fn eval_builtin_free_fn_call(
         }
 
         "to_u32" => {
-            if arg_vals.len() != 1 {
+            if arg_vals.len() != 1 || orig_args.len() != 1 {
                 panic!("`to_u32` expects exactly one argument");
             }
-            let src = arg_vals.remove(0);
 
-            // Fresh 32-bit unsigned integer as the result.
-            let res = state.fresh_sym("to_u32", SymType::Uint(32));
+            let src_expr = orig_args.remove(0);
+            let src_val = arg_vals.remove(0);
 
-            // Connect the new u32 symbol with the source value (0/1-encoded bool in practice).
-            let eq = res.clone().eq_to(src);
+            let src_ty_opt = state.infer_expr_type(&src_expr);
+
+            match state.ctx.config.solver.kind {
+                SolverKind::Cvc5Ff => {
+                    // Only allow u8 / bool / field here.
+                    let allowed = if let Some(src_ty) = src_ty_opt.clone() {
+                        match state.type_map(&src_ty) {
+                            Ok(SymType::Uint(8)) | Ok(SymType::Bool) | Ok(SymType::F) => true,
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !allowed {
+                        panic!(
+                            "`to_u32` under cvc5_ff is only allowed on u8/bool/field arguments; \
+                             got static type {:?} for expression `{:?}` (possible field-domain issue)",
+                            src_ty_opt, src_expr
+                        );
+                    }
+
+                    // Transparent cast: keep the original value.
+                    return Vector::unit((src_val, state));
+                }
+
+                // For non-cvc5_ff backends, keep the old encoding.
+                _ => {
+                    let res = state.fresh_sym("to_u32", SymType::Uint(32));
+                    let eq = res.clone().eq_to(src_val);
+                    state = state.with_pc(eq);
+                    return Vector::unit((res, state));
+                }
+            }
+        }
+
+        "to_word" => {
+            if arg_vals.len() != 1 || orig_args.len() != 1 {
+                panic!("`to_word` expects exactly one argument");
+            }
+
+            let src_expr = orig_args.remove(0);
+            let src_val = arg_vals.remove(0);
+
+            // Require a plain variable path as input.
+            match src_expr {
+                Expr::Path { .. } => {}
+                other => {
+                    panic!(
+                        "`to_word` expects a variable path as argument, got expression `{:?}`",
+                        other
+                    );
+                }
+            }
+
+            // Require the static type to be u32.
+            let src_ty_opt = state.infer_expr_type(&src_expr);
+            let sty = src_ty_opt
+                .as_ref()
+                .and_then(|t| state.type_map(t).ok())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`to_word` failed to infer symbolic sort for expression `{:?}`",
+                        src_expr
+                    )
+                });
+
+            match sty {
+                SymType::Uint(32) => {}
+                other => {
+                    panic!(
+                        "`to_word` expects a u32-typed argument, got symbolic sort {:?} for expression `{:?}`",
+                        other, src_expr
+                    );
+                }
+            }
+
+            // Model [u8; 4] as four fresh Uint(8) bytes in range [0, 255].
+            let mut word = Vec::with_capacity(4);
+            for i in 0..4 {
+                let b = state.fresh_sym(&format!("to_word_b{}", i), SymType::Uint(8));
+                let zero = SymExpr::Int(0);
+                let max = SymExpr::Int(255);
+
+                // 0 <= b <= 255
+                let ge_zero = b.clone().ge(zero);
+                let le_max = b.clone().le(max);
+                state = state.with_pc(ge_zero);
+                state = state.with_pc(le_max);
+
+                word.push(b);
+            }
+
+            // Link the 4 bytes back to the original u32 using little-endian encoding:
+            // src == b0 + 256 * (b1 + 256 * (b2 + 256 * b3))
+            let two_fifty_six = SymExpr::Int(256);
+            let acc3 = word[3].clone();
+            let acc2 = word[2].clone() + two_fifty_six.clone() * acc3;
+            let acc1 = word[1].clone() + two_fifty_six.clone() * acc2;
+            let acc0 = word[0].clone() + two_fifty_six * acc1;
+            let eq = acc0.eq_to(src_val.clone());
             state = state.with_pc(eq);
 
-            Vector::unit((res, state))
+            // The byte array is represented implicitly by the four byte variables
+            // and the above constraints. We keep the scalar return as the original u32.
+            Vector::unit((src_val, state))
         }
 
         other => {

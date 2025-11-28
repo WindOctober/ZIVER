@@ -1,7 +1,7 @@
 use crate::{
     ast::*,
     checker::symbolic::expr::{SymExpr, SymType},
-    utils::module_resolver::Module,
+    utils::{SetConfig, module_resolver::Module},
 };
 use std::collections::HashMap;
 
@@ -55,6 +55,7 @@ pub struct Context {
     struct_index: HashMap<String, i64>, // struct name -> struct_id
     types: TypeCtx,
     func_owner: HashMap<i64, i64>, // record method ownership (func_id -> struct_id)
+    pub config: SetConfig,
 }
 
 impl Context {
@@ -305,7 +306,7 @@ impl Context {
     }
 
     /// Best-effort static type inference from ids already attached to nodes.
-    pub fn infer_expr_type(&self, e: &Expr) -> Option<Type> {
+    pub fn infer_expr_type_static(&self, e: &Expr) -> Option<Type> {
         match e {
             // Integer literals: give them a default builtin integer type.
             Expr::Int(_) => Some(self.builtin_uint_type(Self::DEFAULT_INT_WIDTH)),
@@ -338,22 +339,22 @@ impl Context {
                     }
                 }
                 // Fallback: use the base expression type if we cannot resolve field id directly.
-                self.infer_expr_type(base)
+                self.infer_expr_type_static(base)
             }
 
-            Expr::Call(callee, _args) => self.infer_expr_type(callee),
+            Expr::Call(callee, _args) => self.infer_expr_type_static(callee),
 
             Expr::Index(base, _idx) => {
-                if let Some(Type::Array(inner, _)) = self.infer_expr_type(base) {
+                if let Some(Type::Array(inner, _)) = self.infer_expr_type_static(base) {
                     return Some((*inner).clone());
                 }
                 None
             }
 
-            // New: binary expression type inference via SymType normalization.
+            // Binary expression type inference via SymType normalization.
             Expr::Binary { op, lhs, rhs } => {
-                let lt = self.infer_expr_type(lhs)?;
-                let rt = self.infer_expr_type(rhs)?;
+                let lt = self.infer_expr_type_static(lhs)?;
+                let rt = self.infer_expr_type_static(rhs)?;
 
                 // Only builtin scalar types participate in this normalization.
                 let ls = self.builtin_type_to_sym_type(&lt)?;
@@ -363,7 +364,7 @@ impl Context {
                 Some(self.sym_type_to_builtin_type(&res_sym))
             }
 
-            Expr::Paren(inner) => self.infer_expr_type(inner),
+            Expr::Paren(inner) => self.infer_expr_type_static(inner),
         }
     }
 
@@ -634,7 +635,7 @@ fn resolve_expr_ids_flat(e: &mut Expr, scope: &Scope, ctx: &mut Context) {
             resolve_expr_ids_flat(base, scope, ctx);
 
             // Determine the static type of the base expression.
-            let base_ty = ctx.infer_expr_type(base);
+            let base_ty = ctx.infer_expr_type_static(base);
 
             // If base is a struct value (Type::Path with struct_id), resolve the member.
             if let Some(Type::Path {

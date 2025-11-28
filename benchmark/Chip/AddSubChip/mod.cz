@@ -1,0 +1,26 @@
+import event;
+
+
+struct AddSubCols<T> {
+    /// The program counter.
+    pub pc: T,
+
+    /// Instance of `AddOperation` to handle addition logic in `AddSubChip`'s ALU operations.
+    /// It's result will be `a` for the add operation and `b` for the sub operation.
+    pub add_operation: AddOperation<T>,
+
+    /// The first input operand.  This will be `b` for add operations and `a` for sub operations.
+    pub operand_1: Word<T>,
+
+    /// The second input operand.  This will be `c` for both operations.
+    pub operand_2: Word<T>,
+
+    /// Whether the first operand is not register 0.
+    pub op_a_not_0: T,
+
+    /// Boolean to indicate whether the row is for an add operation.
+    pub is_add: T,
+
+    /// Boolean to indicate whether the row is for a sub operation.
+    pub is_sub: T,
+}

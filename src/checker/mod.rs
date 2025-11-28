@@ -6,7 +6,7 @@ use std::{collections::HashMap, rc::Rc};
 use crate::{
     ast::{Expr, File, Func, IOType, Item, Type},
     checker::{
-        solver::check_with_z3,
+        solver::{SmtBackend, check_with_solver},
         symbolic::{
             context::{Context, PathKind},
             execute::SymbolicExecutor,
@@ -14,7 +14,7 @@ use crate::{
             state::{StoreNode, SymState},
         },
     },
-    utils::SetConfig,
+    utils::{SetConfig, SolverKind},
 };
 
 /// Build a map from field id to IOType for the given struct id.
@@ -295,12 +295,12 @@ impl<'a> QueryCheck<'a> {
 
         let lhs_ty = self
             .ctx
-            .infer_expr_type(lhs_expr)
+            .infer_expr_type_static(lhs_expr)
             .ok_or_else(|| format!("failed to infer type for LHS root `{:?}`", lhs_path))?;
 
         let rhs_ty = self
             .ctx
-            .infer_expr_type(rhs_expr)
+            .infer_expr_type_static(rhs_expr)
             .ok_or_else(|| format!("failed to infer type for RHS root `{:?}`", rhs_path))?;
 
         // Struct roots (e.g. `self`, `cols`) are handled by field-level IO roles.
@@ -458,7 +458,14 @@ impl<'a> QueryCheck<'a> {
 ///
 /// Entry 0 on each side is the member name (`f`, `g`); remaining entries are
 /// roots (either struct-typed or scalar-typed parameters).
-pub fn check_equivalence(file: &File, ctx: Rc<Context>, _config: SetConfig) -> Result<(), String> {
+pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Result<(), String> {
+    let backend = match config.solver.kind {
+        SolverKind::Z3Nia => SmtBackend::Z3Nia,
+        SolverKind::Cvc5Ff => SmtBackend::Cvc5Ff {
+            cmd: config.solver.cvc5_cmd.clone(),
+        },
+    };
+
     for (_, comp_name, members, query_opt) in file.components() {
         let query = match query_opt {
             Some(q) => q,
@@ -520,8 +527,15 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, _config: SetConfig) -> R
             &query.rhs,
         )?;
 
+        // Initialize parameters; materialize `self` if method.
+        let fid: i64 = lhs_func.id.expect("function id must be set");
+        let self_struct_id = ctx.method_owner(fid);
+
         // Execute LHS.
-        let lhs_init = SymState::new(Rc::clone(&ctx));
+        let mut lhs_init = SymState::new(Rc::clone(&ctx));
+
+        lhs_init.init_params_for_func(&lhs_func, self_struct_id);
+
         let lhs_terms = lhs_func.clone().execute(lhs_init);
         if lhs_terms.is_empty() {
             return Err(format!(
@@ -537,7 +551,9 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, _config: SetConfig) -> R
             .max()
             .unwrap_or(0);
 
-        let rhs_init = SymState::new(Rc::clone(&ctx)).with_fresh_start(max_fresh_lhs);
+        let mut rhs_init = SymState::new(Rc::clone(&ctx)).with_fresh_start(max_fresh_lhs);
+        rhs_init.init_params_for_func(&rhs_func, self_struct_id);
+
         let rhs_terms = rhs_func.clone().execute(rhs_init);
         if rhs_terms.is_empty() {
             return Err(format!(
@@ -591,14 +607,14 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, _config: SetConfig) -> R
 
                 let pc_lhs = lhs_final.pc();
                 let pc_rhs = rhs_final.pc();
+
                 let phi = BoolExpr::and(vec![pc_lhs, pc_rhs, eq_inputs, outputs_diff]);
+                // println!(
+                //     "Component `{}` (lhs path {}, rhs path {}): generated SMT formula for equivalence checking:\n{}",
+                //     comp_name, li, rj, phi
+                // );
 
-                println!(
-                    "Component `{}` (lhs path {}, rhs path {}): generated SMT formula for equivalence checking:\n{}",
-                    comp_name, li, rj, phi
-                );
-
-                let sat = check_with_z3(&phi)?;
+                let sat = check_with_solver(&phi, backend.clone())?;
                 if sat {
                     return Err(format!(
                         "Component `{}`: equivalence check failed; SMT found a model with equal inputs but differing outputs (lhs path {}, rhs path {})",

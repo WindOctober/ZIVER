@@ -1,0 +1,16 @@
+struct Instruction {
+    // The operation to execute.
+    input opcode: u32,  // enum Opcode -> int
+    // The first operand.
+    input op_a: u8,
+    /// The second operand.
+    input op_b: u32,
+    /// The third operand.
+    input op_c: u32,
+    /// Whether the second operand is an immediate value.
+    input imm_b: bool,
+    /// Whether the third operand is an immediate value.
+    input imm_c: bool,
+}
+
+fn execute_alu()
