@@ -528,6 +528,14 @@ fn parse_type(p: Pair<Rule>) -> Result<Type> {
                 value: Box::new(val),
             }
         }
+        Rule::tuple_ty => {
+            // tuple_ty := "(" ~ type_ref ~ ("," ~ type_ref)+ ~ ")"
+            let elems: Vec<Type> = p
+                .into_inner()
+                .map(parse_type)
+                .collect::<Result<Vec<_>>>()?;
+            Type::Tuple(elems)
+        }
         Rule::path => Type::Path {
             segments: parse_path(p),
             ref_id: None,
@@ -555,11 +563,11 @@ fn parse_lvalue(p: Pair<Rule>) -> Result<LValue> {
     for t in it {
         match t.as_rule() {
             Rule::field_tail => {
-                // field_tail := "." ~ ident
+                // field_tail := "." ~ (ident | int)
                 let seg = t
                     .into_inner()
                     .next()
-                    .ok_or_else(|| anyhow!("field_tail missing ident"))?;
+                    .ok_or_else(|| anyhow!("field_tail missing selector"))?;
                 tails.push(LvTail::Field {
                     name: seg.as_str().to_string(),
                 });

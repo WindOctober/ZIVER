@@ -97,6 +97,8 @@ pub enum Type {
         segments: Vec<String>,
         ref_id: Option<i64>,
     },
+    /// Tuple type, retaining element types in order.
+    Tuple(Vec<Type>),
     /// Array type
     Array(Box<Type>, Expr),
     /// Map type with (timestamp, key, value) sub-types.

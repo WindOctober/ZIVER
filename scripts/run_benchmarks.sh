@@ -9,12 +9,13 @@ BIN="$ROOT/target/debug/certzero"
 RESULTS="$ROOT/benchmark_results.txt"
 
 CASES=(
-  "benchmark/Component/Add/add.cz z3_nia"
-  "benchmark/Component/Add4/add4.cz z3_nia"
-  "benchmark/Component/And/and.cz z3_nia"
-  "benchmark/Component/IsEqualWordOperation/is_equal.cz cvc5_ff"
-  "benchmark/Component/IsZeroOperation/is_zero.cz cvc5_ff"
-  "benchmark/Component/IsZeroWordOperation/is_zero_word.cz cvc5_ff"
+  "benchmark/Add/add.cz z3_nia"
+  "benchmark/Add4/add4.cz z3_nia"
+  "benchmark/And/and.cz z3_nia"
+  "benchmark/IsEqualWordOperation/is_equal.cz cvc5_ff"
+  "benchmark/IsZeroOperation/is_zero.cz cvc5_ff"
+  "benchmark/IsZeroWordOperation/is_zero_word.cz cvc5_ff"
+  "benchmark/MapRead/map_read.cz z3_nia"
 )
 
 echo "[bench] building..."

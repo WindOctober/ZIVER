@@ -46,8 +46,7 @@ impl Cvc5ffBackend {
                 | (SymType::F, SymType::Uint(_))
                 | (SymType::F, SymType::Int(_)) => true,
                 (SymType::Uint(_), SymType::F) | (SymType::Int(_), SymType::F) => true,
-                (SymType::Uint(_), SymType::Uint(_))
-                | (SymType::Int(_), SymType::Int(_)) => true,
+                (SymType::Uint(_), SymType::Uint(_)) | (SymType::Int(_), SymType::Int(_)) => true,
                 _ => false,
             };
 
@@ -464,12 +463,10 @@ impl Cvc5ffBackend {
                 if let Some(res) = self.encode_order_with_pow2_const("le", a, b) {
                     return res;
                 }
-                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF"
-                    .to_string())
+                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF".to_string())
             }
             BoolExpr::Lt(_, _) => {
-                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF"
-                    .to_string())
+                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF".to_string())
             }
             BoolExpr::Ge(a, b) => {
                 if let Some(res) = self.encode_order_with_const("ge", a, b) {
@@ -478,8 +475,7 @@ impl Cvc5ffBackend {
                 if let Some(res) = self.encode_order_with_pow2_const("ge", a, b) {
                     return res;
                 }
-                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF"
-                    .to_string())
+                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF".to_string())
             }
             BoolExpr::Gt(a, b) => {
                 if let Some(res) = self.encode_order_with_const("gt", a, b) {
@@ -488,8 +484,7 @@ impl Cvc5ffBackend {
                 if let Some(res) = self.encode_order_with_pow2_const("gt", a, b) {
                     return res;
                 }
-                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF"
-                    .to_string())
+                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF".to_string())
             }
             BoolExpr::Range {
                 value,

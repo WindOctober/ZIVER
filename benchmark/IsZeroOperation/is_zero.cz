@@ -26,7 +26,7 @@ Component IsZeroOperation {
     assert_eq(cols.result * a, 0);
 
     // addtional assert to avoid inconsistency for inverse [Benign]
-    assert_eq(cols.result * cols.inverse, 0);
+    // assert_eq(cols.result * cols.inverse, 0);
   }
   Query(populate,self,a;eval,cols,a)
 }

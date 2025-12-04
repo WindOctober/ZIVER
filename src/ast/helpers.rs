@@ -49,6 +49,9 @@ impl Type {
             Type::Map { .. } => {
                 panic!("map type is not supported in {ctx}: requires allocation semantics");
             }
+            Type::Tuple(_) => {
+                panic!("tuple type is not supported in {ctx}: requires allocation semantics");
+            }
             Type::Function { .. } => {
                 panic!("function type is not first-class in {ctx}");
             }

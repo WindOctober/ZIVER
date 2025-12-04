@@ -770,6 +770,18 @@ impl SymState {
                 StoreNode::scalar(self.fresh_sym(&format!("{hint}_map"), SymType::F))
             }
 
+            Type::Tuple(elems) => {
+                let mut children = IMap::new();
+                for (i, elem_ty) in elems.iter().enumerate() {
+                    let child = self.alloc_node_for_type(&format!("{hint}_{i}"), elem_ty);
+                    children.insert(i, child);
+                }
+                StoreNode::Array {
+                    len: Some(elems.len()),
+                    elems: children,
+                }
+            }
+
             // Function types are not allowed in value allocation; report as unimplemented.
             Type::Function { .. } => {
                 unimplemented!(

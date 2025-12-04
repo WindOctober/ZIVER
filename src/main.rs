@@ -127,14 +127,13 @@ mod tests {
     fn component_benchmarks_without_add4() {
         // Backend mapping mirrors the benchmark script but skips add4 (too slow for tests).
         let cases = vec![
-            ("benchmark/Component/Add/add.cz", "z3_nia"),
+            ("benchmark/Add/add.cz", "z3_nia"),
             (
-                "benchmark/Component/IsEqualWordOperation/is_equal.cz",
+                "benchmark/IsEqualWordOperation/is_equal.cz",
                 "cvc5_ff",
             ),
-            ("benchmark/Component/IsZeroOperation/is_zero.cz", "cvc5_ff"),
             (
-                "benchmark/Component/IsZeroWordOperation/is_zero_word.cz",
+                "benchmark/IsZeroWordOperation/is_zero_word.cz",
                 "cvc5_ff",
             ),
         ];

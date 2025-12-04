@@ -181,6 +181,71 @@ impl<'a> QueryCheck<'a> {
 
                 Ok(())
             }
+            Type::Tuple(elems) => {
+                let (llen, lelems, rlen, relems) = match (lhs_node, rhs_node) {
+                    (
+                        StoreNode::Array {
+                            len: llen,
+                            elems: lelems,
+                        },
+                        StoreNode::Array {
+                            len: rlen,
+                            elems: relems,
+                        },
+                    ) => (llen, lelems, rlen, relems),
+                    _ => {
+                        return Err(format!(
+                            "Component `{}`: tuple-typed Query node must be backed by array store nodes (paths {}, {})",
+                            self.comp_name, li, rj
+                        ));
+                    }
+                };
+
+                if let Some(llen) = llen {
+                    if *llen != elems.len() {
+                        return Err(format!(
+                            "Component `{}`: tuple length mismatch (lhs node has {}, type expects {}, paths {}, {})",
+                            self.comp_name, llen, elems.len(), li, rj
+                        ));
+                    }
+                }
+                if let Some(rlen) = rlen {
+                    if *rlen != elems.len() {
+                        return Err(format!(
+                            "Component `{}`: tuple length mismatch (rhs node has {}, type expects {}, paths {}, {})",
+                            self.comp_name, rlen, elems.len(), li, rj
+                        ));
+                    }
+                }
+
+                for (i, elem_ty) in elems.iter().enumerate() {
+                    let lcell = lelems.get(&i).ok_or_else(|| {
+                        format!(
+                            "Component `{}`: lhs tuple element {} missing in Query root (paths {}, {})",
+                            self.comp_name, i, li, rj
+                        )
+                    })?;
+                    let rcell = relems.get(&i).ok_or_else(|| {
+                        format!(
+                            "Component `{}`: rhs tuple element {} missing in Query root (paths {}, {})",
+                            self.comp_name, i, li, rj
+                        )
+                    })?;
+
+                    self.collect_node_pairs_for_type(
+                        elem_ty,
+                        io,
+                        lcell,
+                        rcell,
+                        li,
+                        rj,
+                        input_pairs,
+                        output_pairs,
+                    )?;
+                }
+
+                Ok(())
+            }
             // Maps are treated as opaque scalars for equivalence comparison.
             Type::Map { .. } => {
                 let (lv, rv) = match (lhs_node, rhs_node) {
@@ -617,30 +682,30 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Re
                 }
 
                 // Memory traces must also match.
-                // let lhs_events = lhs_final.memory_trace();
-                // let rhs_events = rhs_final.memory_trace();
-                // if lhs_events.len() != rhs_events.len() {
-                //     return Err(format!(
-                //         "Component `{}`: memory trace length mismatch (lhs path {}, rhs path {}): {} vs {}",
-                //         comp_name,
-                //         li,
-                //         rj,
-                //         lhs_events.len(),
-                //         rhs_events.len()
-                //     ));
-                // }
+                let lhs_events = lhs_final.memory_trace();
+                let rhs_events = rhs_final.memory_trace();
+                if lhs_events.len() != rhs_events.len() {
+                    return Err(format!(
+                        "Component `{}`: memory trace length mismatch (lhs path {}, rhs path {}): {} vs {}",
+                        comp_name,
+                        li,
+                        rj,
+                        lhs_events.len(),
+                        rhs_events.len()
+                    ));
+                }
 
-                // for (idx, (le, re)) in lhs_events.iter().zip(rhs_events.iter()).enumerate() {
-                //     if le.kind != re.kind {
-                //         return Err(format!(
-                //             "Component `{}`: memory event kind mismatch at index {} between lhs path {} and rhs path {}",
-                //             comp_name, idx, li, rj
-                //         ));
-                //     }
-                //     output_pairs.push((le.clk.clone(), re.clk.clone()));
-                //     output_pairs.push((le.addr.clone(), re.addr.clone()));
-                //     output_pairs.push((le.value.clone(), re.value.clone()));
-                // }
+                for (idx, (le, re)) in lhs_events.iter().zip(rhs_events.iter()).enumerate() {
+                    if le.kind != re.kind {
+                        return Err(format!(
+                            "Component `{}`: memory event kind mismatch at index {} between lhs path {} and rhs path {}",
+                            comp_name, idx, li, rj
+                        ));
+                    }
+                    output_pairs.push((le.clk.clone(), re.clk.clone()));
+                    output_pairs.push((le.addr.clone(), re.addr.clone()));
+                    output_pairs.push((le.value.clone(), re.value.clone()));
+                }
 
                 if output_pairs.is_empty() {
                     return Err(format!(

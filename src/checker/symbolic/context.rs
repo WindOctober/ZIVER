@@ -1,6 +1,7 @@
 use crate::{
     ast::*,
     checker::symbolic::expr::{SymExpr, SymType},
+    checker::symbolic::state::MemoryEventKind,
     utils::{SetConfig, module_resolver::Module},
 };
 use std::collections::HashMap;
@@ -29,6 +30,13 @@ impl MemberIndex {
     }
 }
 
+/// Metadata describing a lookup chip that participates in a permutation pair.
+#[derive(Clone, Debug)]
+pub struct MemoryChipMeta {
+    pub kind: MemoryEventKind,
+    pub partner: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathKind {
     Builtin,     // primitive scalar type
@@ -55,6 +63,7 @@ pub struct Context {
     struct_index: HashMap<String, i64>, // struct name -> struct_id
     types: TypeCtx,
     func_owner: HashMap<i64, i64>, // record method ownership (func_id -> struct_id)
+    memory_chips: HashMap<String, MemoryChipMeta>, // lookup chip metadata (lowercase)
     pub config: SetConfig,
 }
 
@@ -319,6 +328,44 @@ impl Context {
         Err(format!("unknown type path by name: {}", last))
     }
 
+    /// Determine the `(clk_prev, value)` pair type produced by a map access.
+    /// If the map value is already a tuple with at least two elements, reuse its head.
+    /// Otherwise default to `(timestamp, value)`.
+    pub fn map_return_pair_types(&self, ts_ty: &Type, val_ty: &Type) -> (Type, Type) {
+        match val_ty {
+            Type::Tuple(elems) if elems.len() >= 2 => {
+                (elems[0].clone(), elems[1].clone())
+            }
+            _ => (ts_ty.clone(), val_ty.clone()),
+        }
+    }
+
+    /// Register a pair of lookup chips that form a permutation relation.
+    pub fn register_memory_permutation(&mut self, send: &str, receive: &str) {
+        let s = send.to_ascii_lowercase();
+        let r = receive.to_ascii_lowercase();
+
+        self.memory_chips.insert(
+            s.clone(),
+            MemoryChipMeta {
+                kind: MemoryEventKind::Send,
+                partner: Some(r.clone()),
+            },
+        );
+        self.memory_chips.insert(
+            r.clone(),
+            MemoryChipMeta {
+                kind: MemoryEventKind::Receive,
+                partner: Some(s),
+            },
+        );
+    }
+
+    /// Lookup metadata for a memory-related chip name.
+    pub fn memory_chip(&self, name: &str) -> Option<&MemoryChipMeta> {
+        self.memory_chips.get(&name.to_ascii_lowercase())
+    }
+
     /// Best-effort static type inference from ids already attached to nodes.
     pub fn infer_expr_type_static(&self, e: &Expr) -> Option<Type> {
         match e {
@@ -349,13 +396,31 @@ impl Context {
                 None
             }
 
-            Expr::Field { ref_id, base, .. } => {
+            Expr::Field { ref_id, base, name } => {
                 if let Some(id) = *ref_id {
                     if let Some(ty) = self.types.field_types.get(&id) {
                         return Some(ty.clone());
                     }
                     if self.funcs.contains_key(&id) {
                         return Some(Type::Function { ref_id: Some(id) });
+                    }
+                }
+                if let Expr::MapIndex { base: map_base, .. } = base.as_ref() {
+                    if let Some(Type::Map { timestamp, value, .. }) =
+                        self.infer_expr_type_static(map_base)
+                    {
+                        let (ts_ty, val_ty) =
+                            self.map_return_pair_types(timestamp.as_ref(), value.as_ref());
+                        return match name.as_str() {
+                            "0" | "clk_prev" => Some(ts_ty),
+                            "1" | "value" => Some(val_ty),
+                            _ => None,
+                        };
+                    }
+                }
+                if let Some(Type::Tuple(elems)) = self.infer_expr_type_static(base) {
+                    if let Ok(idx) = name.parse::<usize>() {
+                        return elems.get(idx).cloned();
                     }
                 }
                 // Fallback: use the base expression type if we cannot resolve field id directly.
@@ -372,8 +437,12 @@ impl Context {
             }
 
             Expr::MapIndex { base, .. } => {
-                if let Some(Type::Map { value, .. }) = self.infer_expr_type_static(base) {
-                    return Some((*value).clone());
+                if let Some(Type::Map { timestamp, value, .. }) =
+                    self.infer_expr_type_static(base)
+                {
+                    let (ts_ty, val_ty) =
+                        self.map_return_pair_types(timestamp.as_ref(), value.as_ref());
+                    return Some(Type::Tuple(vec![ts_ty, val_ty]));
                 }
                 None
             }
@@ -634,6 +703,9 @@ pub fn init_context(mods: &mut [Module]) -> Context {
         scope.pop();
     }
 
+    // Builtin memory permutation: Send <-> Receive.
+    ctx.register_memory_permutation("Send", "Receive");
+
     ctx
 }
 
@@ -712,6 +784,11 @@ fn resolve_type_ids_flat(ty: &mut Type, scope: &Scope, ctx: &mut Context) {
         Type::Array(inner, len_expr) => {
             resolve_type_ids_flat(inner, scope, ctx);
             resolve_expr_ids_flat(len_expr, scope, ctx); // allow const exprs in length
+        }
+        Type::Tuple(elems) => {
+            for t in elems.iter_mut() {
+                resolve_type_ids_flat(t, scope, ctx);
+            }
         }
         Type::Map {
             timestamp,

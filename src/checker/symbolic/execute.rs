@@ -276,6 +276,16 @@ impl SymbolicExecutor for Stmt {
 
         // Evaluate Boolean expressions with sequential semantics.
         fn eval_bool_expr(e: Expr, st: SymState) -> (BoolExpr, SymState) {
+            fn cmp_int<F>(lhs: &SymExpr, rhs: &SymExpr, f: F) -> Option<BoolExpr>
+            where
+                F: Fn(i128, i128) -> bool,
+            {
+                match (lhs, rhs) {
+                    (SymExpr::Int(a), SymExpr::Int(b)) => Some(BoolExpr::Bool(f(*a, *b))),
+                    _ => None,
+                }
+            }
+
             match e {
                 Expr::Bool(b) => (BoolExpr::Bool(b), st),
 
@@ -287,20 +297,28 @@ impl SymbolicExecutor for Stmt {
                     let (rv, s2) = expect_single(rhs.eval(s1), "BoolExpr(rhs)");
 
                     let cond = match op {
-                        BinOp::Eq => lv.eq_to(rv),
-                        BinOp::Ne => lv.ne(rv),
-                        BinOp::Lt => lv.lt(rv),
-                        BinOp::Le => lv.le(rv),
-                        BinOp::Gt => lv.gt(rv),
-                        BinOp::Ge => lv.ge(rv),
+                        BinOp::Eq => {
+                            cmp_int(&lv, &rv, |a, b| a == b).unwrap_or_else(|| lv.eq_to(rv))
+                        }
+                        BinOp::Ne => cmp_int(&lv, &rv, |a, b| a != b).unwrap_or_else(|| lv.ne(rv)),
+                        BinOp::Lt => cmp_int(&lv, &rv, |a, b| a < b).unwrap_or_else(|| lv.lt(rv)),
+                        BinOp::Le => cmp_int(&lv, &rv, |a, b| a <= b).unwrap_or_else(|| lv.le(rv)),
+                        BinOp::Gt => cmp_int(&lv, &rv, |a, b| a > b).unwrap_or_else(|| lv.gt(rv)),
+                        BinOp::Ge => cmp_int(&lv, &rv, |a, b| a >= b).unwrap_or_else(|| lv.ge(rv)),
 
                         // Logical operators treat non-zero as true.
                         BinOp::And => {
+                            if let Some(b) = cmp_int(&lv, &rv, |a, b| a != 0 && b != 0) {
+                                return (b, s2);
+                            }
                             let c1 = lv.ne(SymExpr::Int(0));
                             let c2 = rv.ne(SymExpr::Int(0));
                             BoolExpr::and(vec![c1, c2])
                         }
                         BinOp::Or => {
+                            if let Some(b) = cmp_int(&lv, &rv, |a, b| a != 0 || b != 0) {
+                                return (b, s2);
+                            }
                             let c1 = lv.ne(SymExpr::Int(0));
                             let c2 = rv.ne(SymExpr::Int(0));
                             BoolExpr::or(vec![c1, c2])
@@ -553,8 +571,21 @@ impl SymbolicExecutor for Stmt {
 
                 // Construct the symbolic states for the two branches with
                 // their respective path conditions.
+                let const_guard = if let BoolExpr::Bool(b) = &bcond {
+                    Some(*b)
+                } else {
+                    None
+                };
                 let then_start = s_after_cond.clone().with_pc(bcond.clone());
                 let else_start = s_after_cond.with_pc(bcond.not());
+
+                // Short-circuit constant branches to avoid unnecessary path explosion.
+                if const_guard == Some(true) {
+                    return exec_block(Vector::unit(then_start), &then_branch);
+                }
+                if const_guard == Some(false) {
+                    return exec_block(Vector::unit(else_start), &else_branch);
+                }
 
                 let mut res_then = exec_block(Vector::unit(then_start), &then_branch);
                 let res_else = exec_block(Vector::unit(else_start), &else_branch);
@@ -735,7 +766,7 @@ impl SymbolicExecutor for Stmt {
                         }
                         other => panic!("unsupported ByteChip opcode {}", other),
                     }
-                } else if chip_name == "send" || chip_name == "receive" {
+                } else if let Some(meta) = st.ctx.memory_chip(&chip_name).cloned() {
                     if args.len() < 3 {
                         panic!("Memory send/receive expects clk, addr, value");
                     }
@@ -760,13 +791,9 @@ impl SymbolicExecutor for Stmt {
                     let clk = payload_vals[0].clone();
                     let addr = payload_vals[1].clone();
                     let val = payload_vals[2].clone();
-                    let kind = if chip_name == "send" {
-                        MemoryEventKind::Send
-                    } else {
-                        MemoryEventKind::Receive
-                    };
 
-                    state_after_opcode = state_after_opcode.add_memory_event(kind, clk, addr, val);
+                    state_after_opcode =
+                        state_after_opcode.add_memory_event(meta.kind, clk, addr, val);
                     Vector::unit((None, state_after_opcode))
                 } else {
                     panic!("unsupported lookup chip `{:?}`", chip);
@@ -983,8 +1010,8 @@ impl Expr {
                     );
 
                     let out = match name.as_str() {
-                        "clk_prev" => clk_prev,
-                        "value" => val,
+                        "clk_prev" | "0" => clk_prev,
+                        "value" | "1" => val,
                         other => panic!("unknown map projection `{}`", other),
                     };
 
@@ -1304,34 +1331,6 @@ fn lvalue_to_expr(lv: &LValue) -> Expr {
     e
 }
 
-fn lvalue_eq(a: &LValue, b: &LValue) -> bool {
-    if a.ref_id != b.ref_id {
-        return false;
-    }
-    if a.head != b.head {
-        return false;
-    }
-    if a.tails.len() != b.tails.len() {
-        return false;
-    }
-    for (t1, t2) in a.tails.iter().zip(b.tails.iter()) {
-        match (t1, t2) {
-            (LvTail::Field { name: n1 }, LvTail::Field { name: n2 }) => {
-                if n1 != n2 {
-                    return false;
-                }
-            }
-            (LvTail::Index(e1), LvTail::Index(e2)) => {
-                if format!("{:?}", e1) != format!("{:?}", e2) {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-    }
-    true
-}
-
 /// Evaluate call arguments sequentially and return values with the final state.
 fn eval_call_args(mut state: SymState, args: Vec<Expr>) -> (Vec<SymExpr>, SymState) {
     let mut vals = Vec::with_capacity(args.len());
@@ -1372,6 +1371,9 @@ fn eval_map_index_projection(
         },
         _ => panic!("map access requires a named map variable"),
     };
+    let (ret_ts_ty, ret_val_ty) = state
+        .ctx
+        .map_return_pair_types(&ts_ty, &val_ty);
 
     // Evaluate keys.
     let (clk, s1) = expect_single(clk_expr.eval(state), "map key clk");
@@ -1384,10 +1386,10 @@ fn eval_map_index_projection(
 
     // Fresh symbols for the returned pair.
     let ts_sym = s2
-        .type_map(&ts_ty)
+        .type_map(&ret_ts_ty)
         .unwrap_or_else(|e| panic!("map timestamp type mapping failed: {e}"));
     let val_sym_ty = s2
-        .type_map(&val_ty)
+        .type_map(&ret_val_ty)
         .unwrap_or_else(|e| panic!("map value type mapping failed: {e}"));
 
     let clk_prev = s2.fresh_sym("map_clk_prev", ts_sym);

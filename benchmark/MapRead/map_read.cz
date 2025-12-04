@@ -6,18 +6,18 @@ Struct MapRead {
 }
 
 Component MapRead {
-    Computation populate(self, register: map<timestamp, field, field>, clk_cur: timestamp, addr: field) {
-        // Read (clk_prev, value) from the register using tuple-key map access.
-        self.clk_prev = register[clk_cur, addr].clk_prev;
-        self.value = register[clk_cur, addr].value;
+    Computation populate(self, register: map<timestamp, field, (timestamp, field)>, clk_cur: timestamp, addr: field) {
+        // Read (clk_prev, value) from the register; map entries return a tuple.
+        self.clk_prev = register[clk_cur, addr].0;
+        self.value = register[clk_cur, addr].1;
         self.clk_cur = clk_cur;
         self.addr = addr;
     }
 
-    Constraint eval(cols: MapRead, register: map<timestamp, field, field>) {
+    Constraint eval(cols: MapRead, register: map<timestamp, field, (timestamp, field)>) {
         // Enforce timestamp ordering between the current and previous access:
         // ensure 0 <= clk_cur - clk_prev - 1 < 2^24.
-        let diff_minus_one: timestamp = cols.clk_cur - cols.clk_prev - 1;
+        timestamp diff_minus_one = cols.clk_cur - cols.clk_prev - 1;
         assert_range(diff_minus_one, u24);
 
         // Explicitly log the memory interaction for permutation checking downstream.

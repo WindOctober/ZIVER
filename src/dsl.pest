@@ -17,9 +17,10 @@ const_decl  = { "const" ~ type_ref ~ ident ~ "=" ~ expr ~ ";" }
 
 // === Types ===
 // A type can be an identifier path or an array type.
-type_ref   = { array_ty | map_ty | path }
+type_ref   = { array_ty | map_ty | tuple_ty | path }
 array_ty   = { "[" ~ type_ref ~ ";" ~ expr ~ "]" }
 map_ty     = { "map" ~ "<" ~ type_ref ~ "," ~ type_ref ~ "," ~ type_ref ~ ">" }
+tuple_ty   = { "(" ~ type_ref ~ ("," ~ type_ref)+ ~ ")" }
 
 // === Path ===
 // A path may contain multiple segments separated by '::'.
@@ -79,7 +80,7 @@ arg_list  = { expr ~ ("," ~ expr)* ~ (",")? }
 call_tail  = { "(" ~ (arg_list)? ~ ")" }
 index_tail = { "[" ~ expr ~ "]" }
 map_index_tail = { "[" ~ expr ~ "," ~ expr ~ "]" }
-field_tail = { "." ~ ident }
+field_tail = { "." ~ (ident | int) }
 
 return_stmt = { "return" ~ expr ~ ";" }
 
