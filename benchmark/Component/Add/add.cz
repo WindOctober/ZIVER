@@ -1,0 +1,83 @@
+const usize WORD_SIZE = 4;
+const field BASE = 256;
+
+Struct AddOperation {
+    output value: [field; WORD_SIZE],
+    output carry: [field; 3],
+}
+
+Component AddOperation {
+
+    Computation populate(self, a: [field; WORD_SIZE], b: [field; WORD_SIZE]) {
+        field s0 = a[0] + b[0];
+
+        for i in 0..WORD_SIZE{
+            assert_range(a[i],u8);
+            assert_range(b[i],u8);
+        }
+
+        if (s0 > 255) {
+            self.carry[0] = 1;
+            s0 = s0 - BASE;
+        } else {
+            self.carry[0] = 0;
+        }
+        self.value[0] = s0;
+
+        field s1 = a[1] + b[1] + self.carry[0];
+        if (s1 > 255) {
+            self.carry[1] = 1;
+            s1 = s1 - BASE;
+        } else {
+            self.carry[1] = 0;
+        }
+        self.value[1] = s1;
+
+        field s2 = a[2] + b[2] + self.carry[1];
+        if (s2 > 255) {
+            self.carry[2] = 1;
+            s2 = s2 - BASE;
+        } else {
+            self.carry[2] = 0;
+        }
+        self.value[2] = s2;
+
+        field s3 = a[3] + b[3] + self.carry[2];
+        if (s3 > 255) {
+            s3 = s3 - BASE;
+        }
+        self.value[3] = s3;
+    }
+
+    Constraint eval(cols: AddOperation, a: [field; WORD_SIZE], b: [field; WORD_SIZE], is_real: Selector) {
+        field overflow_0 = a[0] + b[0] - cols.value[0];
+        field overflow_1 = a[1] + b[1] - cols.value[1] + cols.carry[0];
+        field overflow_2 = a[2] + b[2] - cols.value[2] + cols.carry[1];
+        field overflow_3 = a[3] + b[3] - cols.value[3] + cols.carry[2];
+
+        assert_zero(overflow_0 * (overflow_0 - BASE));
+        assert_zero(overflow_1 * (overflow_1 - BASE));
+        assert_zero(overflow_2 * (overflow_2 - BASE));
+        assert_zero(overflow_3 * (overflow_3 - BASE));
+
+        assert_zero(cols.carry[0] * (overflow_0 - BASE));
+        assert_zero(cols.carry[1] * (overflow_1 - BASE));
+        assert_zero(cols.carry[2] * (overflow_2 - BASE));
+
+        assert_zero((cols.carry[0] - one) * overflow_0);
+        assert_zero((cols.carry[1] - one) * overflow_1);
+        assert_zero((cols.carry[2] - one) * overflow_2);
+
+        assert_bool(cols.carry[0]);
+        assert_bool(cols.carry[1]);
+        assert_bool(cols.carry[2]);
+        assert_bool(is_real);
+
+        for i in 0..WORD_SIZE {
+            lookup(ByteChip, 0, 0, a[i], b[i]);
+            lookup(ByteChip, 0, 0, cols.value[i], 0);
+        }
+    }
+
+    Query(populate, self, a, b; eval, cols, a, b)
+}
