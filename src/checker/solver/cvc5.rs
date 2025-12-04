@@ -9,6 +9,7 @@ pub struct Cvc5ffBackend {
     field_modulus: i128,
     vars: HashMap<String, SymType>,
     asserts: Vec<String>,
+    range_fresh: usize,
 }
 
 impl Cvc5ffBackend {
@@ -17,6 +18,7 @@ impl Cvc5ffBackend {
             field_modulus,
             vars: HashMap::new(),
             asserts: Vec::new(),
+            range_fresh: 0,
         }
     }
 
@@ -138,6 +140,61 @@ impl Cvc5ffBackend {
         }
     }
 
+    /// Encode a byte-wise range decomposition in the finite field backend.
+    /// This enforces `value` to lie in `[0, 2^{bits}-1]` by expressing it
+    /// as the sum of little-endian bytes composed from Boolean bits.
+    fn encode_range_byte_decomposition(
+        &mut self,
+        value: &SymExpr,
+        bits: usize,
+    ) -> Result<String, String> {
+        if bits == 0 || bits > 16 {
+            return Err("cvc5-ff: byte decomposition only supports 1..16 bits".to_string());
+        }
+
+        let target = self.encode_term(value)?;
+        let mut remaining = bits;
+        let byte_count = (bits + 7) / 8;
+        let range_id = self.range_fresh;
+        self.range_fresh += 1;
+
+        let mut accum_terms = Vec::new();
+        for i in 0..byte_count {
+            let chunk_bits = remaining.min(8);
+            remaining -= chunk_bits;
+
+            let mut bit_terms = Vec::new();
+            for j in 0..chunk_bits {
+                let name = format!("__range_b{}_{}_{}", range_id, i, j);
+                self.ensure_var(&name, &SymType::Bool)?;
+                let coeff = 1_i128 << j;
+                bit_terms.push(format!("(ff.mul (as ff{} F) {})", coeff, name));
+            }
+
+            let byte_sum = if bit_terms.len() == 1 {
+                bit_terms[0].clone()
+            } else {
+                format!("(ff.add {})", bit_terms.join(" "))
+            };
+
+            let scale = 256_i128.pow(i as u32);
+            let scaled = if scale == 1 {
+                byte_sum.clone()
+            } else {
+                format!("(ff.mul (as ff{} F) {})", scale, byte_sum)
+            };
+            accum_terms.push(scaled);
+        }
+
+        let combined = if accum_terms.len() == 1 {
+            accum_terms.remove(0)
+        } else {
+            format!("(ff.add {})", accum_terms.join(" "))
+        };
+
+        Ok(format!("(= {} {})", target, combined))
+    }
+
     fn encode_bool(&mut self, b: &BoolExpr) -> Result<String, String> {
         match b {
             BoolExpr::Bool(v) => Ok(if *v {
@@ -191,6 +248,30 @@ impl Cvc5ffBackend {
 
             BoolExpr::Le(_, _) | BoolExpr::Lt(_, _) | BoolExpr::Ge(_, _) | BoolExpr::Gt(_, _) => {
                 Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF".to_string())
+            }
+            BoolExpr::Range {
+                value,
+                min,
+                max,
+                bits,
+            } => {
+                if *min != 0 {
+                    return Err("cvc5-ff: only non-negative ranges are supported".to_string());
+                }
+
+                let bw = bits.ok_or_else(|| {
+                    "cvc5-ff: bit-width hint is required for range predicates".to_string()
+                })?;
+
+                let expected_max = (1_i128 << bw) - 1;
+                if *max != expected_max {
+                    return Err(format!(
+                        "cvc5-ff: range upper bound must be 2^bits-1 (got {}, bits={})",
+                        max, bw
+                    ));
+                }
+
+                self.encode_range_byte_decomposition(value, bw)
             }
         }
     }

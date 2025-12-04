@@ -25,6 +25,22 @@ enum ReceiverStep {
     Index(usize),
 }
 
+fn sym_bounds(sty: &SymType) -> Option<(i128, i128, usize)> {
+    match *sty {
+        SymType::Bool => Some((0, 1, 1)),
+        SymType::Uint(w) if w > 0 && w < 127 => {
+            let max = 1_i128.checked_shl(w as u32)?.saturating_sub(1);
+            Some((0, max, w))
+        }
+        SymType::Int(w) if w > 0 && w < 127 => {
+            let hi = 1_i128.checked_shl((w - 1) as u32)?.saturating_sub(1);
+            let lo = -(1_i128.checked_shl((w - 1) as u32)?);
+            Some((lo, hi, w))
+        }
+        _ => None,
+    }
+}
+
 pub trait SymbolicExecutor {
     /// Execute one step and produce successor states.
     /// For non-return statements/expressions, the first item is None.
@@ -353,6 +369,45 @@ impl SymbolicExecutor for Stmt {
                 }
             }
 
+            Stmt::AssertZero(e) => {
+                let evals = e.eval(st);
+                if evals.len() != 1 {
+                    panic!("branching in assert_zero is unsupported");
+                }
+                let (v, s1) = evals[0].clone();
+                let cond = v.eq_to(SymExpr::Int(0));
+                let mut out = Vector::new();
+                for s in Self::split_on_bool_mul_eq_zero(s1, cond) {
+                    out.push_back((None, s));
+                }
+                out
+            }
+
+            Stmt::AssertRange { value, ty } => {
+                let sym_ty = st
+                    .ctx
+                    .builtin_type_to_sym_type(&ty)
+                    .unwrap_or_else(|| panic!("assert_range requires a builtin scalar type"));
+                let evals = value.eval(st);
+                if evals.is_empty() {
+                    panic!("assert_range expression produced no value");
+                }
+                let (min, max, bits) = sym_bounds(&sym_ty)
+                    .unwrap_or_else(|| panic!("assert_range does not support type {:?}", sym_ty));
+
+                let mut out = Vector::new();
+                for (v, s1) in evals {
+                    let cond = BoolExpr::Range {
+                        value: v,
+                        min,
+                        max,
+                        bits: Some(bits),
+                    };
+                    out.push_back((None, s1.with_pc(cond)));
+                }
+                out
+            }
+
             Stmt::VarDecl { id, ty, init, .. } => {
                 let vid = id.expect("variable id must be assigned during resolve");
                 ty.assert_not_function("variable declaration");
@@ -578,6 +633,61 @@ impl SymbolicExecutor for Stmt {
                 }
 
                 out
+            }
+            Stmt::Lookup { chip, opcode, args } => {
+                let is_byte_chip = chip
+                    .last()
+                    .map(|c| c.eq_ignore_ascii_case("bytechip"))
+                    .unwrap_or(false);
+                if !is_byte_chip {
+                    panic!("unsupported lookup chip `{:?}`", chip);
+                }
+
+                if args.len() < 2 {
+                    panic!("ByteChip lookup expects at least two payload arguments");
+                }
+
+                let opcode_eval = opcode.eval(st);
+                if opcode_eval.len() != 1 {
+                    panic!("opcode evaluation must be deterministic for lookup");
+                }
+                let (opcode_val, mut state_after_opcode) = opcode_eval[0].clone();
+                let opcode_int = match opcode_val {
+                    SymExpr::Int(k) => k,
+                    other => panic!("opcode must be an integer literal, got {:?}", other),
+                };
+
+                let mut payload_vals = Vec::new();
+                for e in args.into_iter() {
+                    let vals = e.eval(state_after_opcode.clone());
+                    if vals.len() != 1 {
+                        panic!("lookup payload evaluation must be deterministic");
+                    }
+                    let (v, s_next) = vals[0].clone();
+                    payload_vals.push(v);
+                    state_after_opcode = s_next;
+                }
+
+                match opcode_int {
+                    0 => {
+                        let len = payload_vals.len();
+                        if len < 2 {
+                            panic!("ByteChip opcode 0 requires two payload values");
+                        }
+
+                        let mut s_cur = state_after_opcode;
+                        for v in payload_vals[len - 2..].iter() {
+                            s_cur = s_cur.with_pc(BoolExpr::Range {
+                                value: v.clone(),
+                                min: 0,
+                                max: 255,
+                                bits: Some(8),
+                            });
+                        }
+                        Vector::unit((None, s_cur))
+                    }
+                    other => panic!("unsupported ByteChip opcode {}", other),
+                }
             }
             Stmt::Call { callee, args } => {
                 // Normalize callee to an expression once.

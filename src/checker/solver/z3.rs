@@ -175,6 +175,14 @@ impl Z3NiaBackend {
             BoolExpr::Lt(a, b) => self.encode_int(a).lt(&self.encode_int(b)),
             BoolExpr::Ge(a, b) => self.encode_int(a).ge(&self.encode_int(b)),
             BoolExpr::Gt(a, b) => self.encode_int(a).gt(&self.encode_int(b)),
+            BoolExpr::Range {
+                value, min, max, ..
+            } => {
+                let v = self.encode_int(value);
+                let lo = Int::from_i64(i64::try_from(*min).expect("range lower bound out of i64"));
+                let hi = Int::from_i64(i64::try_from(*max).expect("range upper bound out of i64"));
+                Bool::and(&[v.ge(&lo), v.le(&hi)])
+            }
         }
     }
 

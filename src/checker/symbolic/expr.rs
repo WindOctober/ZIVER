@@ -44,6 +44,13 @@ pub enum BoolExpr {
     Lt(SymExpr, SymExpr),
     Ge(SymExpr, SymExpr),
     Gt(SymExpr, SymExpr),
+    /// Range predicate `min <= value <= max` with an optional bit-width hint.
+    Range {
+        value: SymExpr,
+        min: i128,
+        max: i128,
+        bits: Option<usize>,
+    },
 }
 
 impl BoolExpr {
@@ -386,6 +393,11 @@ impl BoolExpr {
             BoolExpr::Lt(a, b) => write!(f, "({} < {})", a, b),
             BoolExpr::Ge(a, b) => write!(f, "({} >= {})", a, b),
             BoolExpr::Gt(a, b) => write!(f, "({} > {})", a, b),
+            BoolExpr::Range {
+                value, min, max, ..
+            } => {
+                write!(f, "({} in [{}, {}])", value, min, max)
+            }
         }
     }
 }
