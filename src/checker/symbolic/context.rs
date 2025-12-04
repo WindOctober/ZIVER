@@ -781,10 +781,24 @@ fn resolve_stmt_ids_flat(s: &mut Stmt, ctx: &mut Context, scope: &mut Scope) {
             }
             scope.pop();
         }
-        Stmt::AssertBool(e) => resolve_expr_ids_flat(e, scope, ctx),
+        Stmt::AssertBool(e) | Stmt::AssertZero(e) => resolve_expr_ids_flat(e, scope, ctx),
         Stmt::AssertEq(a, b) => {
             resolve_expr_ids_flat(a, scope, ctx);
             resolve_expr_ids_flat(b, scope, ctx);
+        }
+        Stmt::AssertRange { value, ty } => {
+            resolve_expr_ids_flat(value, scope, ctx);
+            resolve_type_ids_flat(ty, scope, ctx);
+        }
+        Stmt::Lookup { chip, opcode, args } => {
+            resolve_expr_ids_flat(opcode, scope, ctx);
+            for a in args.iter_mut() {
+                resolve_expr_ids_flat(a, scope, ctx);
+            }
+            // Chip identifiers are treated as builtin paths; no scope resolution required.
+            for seg in chip.iter_mut() {
+                *seg = seg.clone();
+            }
         }
         Stmt::Call { callee, args } => {
             resolve_lvalue_ids_flat(callee, scope);

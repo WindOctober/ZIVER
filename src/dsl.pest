@@ -64,8 +64,10 @@ if_stmt  = { "if" ~ expr ~ block ~ ( "else" ~ block )? }
 
 assert_stmt = {
   (
-    "assert_bool" ~ "(" ~ expr ~ (",")? ~ ")"
-  | "assert_eq"   ~ "(" ~ expr ~ "," ~ expr ~ (",")? ~ ")"
+    "assert_bool"  ~ "(" ~ expr ~ (",")? ~ ")"
+  | "assert_eq"    ~ "(" ~ expr ~ "," ~ expr ~ (",")? ~ ")"
+  | "assert_zero"  ~ "(" ~ expr ~ (",")? ~ ")"
+  | "assert_range" ~ "(" ~ expr ~ "," ~ type_ref ~ (",")? ~ ")"
   ) ~ ";"
 }
 

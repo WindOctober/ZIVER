@@ -346,33 +346,7 @@ fn parse_block(p: Pair<Rule>) -> Result<Vec<Stmt>> {
                 }
             }
             Rule::if_stmt => parse_if_stmt(s)?,
-            Rule::assert_stmt => {
-                // assert_bool(expr);  |  assert_eq(expr, expr);
-                // We inspect the number of `expr` children to disambiguate.
-                let mut exprs = Vec::new();
-                for c in s.clone().into_inner() {
-                    if c.as_rule() == Rule::expr {
-                        exprs.push(parse_expr(c)?);
-                    } else if c.as_rule() == Rule::arg_list {
-                        // This branch is not used by current `assert_stmt` rule,
-                        // but kept for robustness in case of future refactoring.
-                        let mut al = Vec::new();
-                        for e in c.into_inner() {
-                            al.push(parse_expr(e)?);
-                        }
-                        exprs = al;
-                    }
-                }
-                match exprs.len() {
-                    1 => Stmt::AssertBool(exprs.remove(0)),
-                    2 => {
-                        let rhs = exprs.pop().unwrap();
-                        let lhs = exprs.pop().unwrap();
-                        Stmt::AssertEq(lhs, rhs)
-                    }
-                    _ => return Err(anyhow!("invalid assert statement")),
-                }
-            }
+            Rule::assert_stmt => parse_assert_stmt(s)?,
             Rule::call_stmt => {
                 // call_stmt := call ";"
                 let call = s.into_inner().next().unwrap();
@@ -420,6 +394,57 @@ fn parse_if_stmt(p: Pair<Rule>) -> Result<Stmt> {
     })
 }
 
+/// Parse an assertion statement with multiple builtin variants.
+fn parse_assert_stmt(s: Pair<Rule>) -> Result<Stmt> {
+    // Collect expressions and optional trailing type.
+    let mut exprs = Vec::new();
+    let mut ty: Option<Type> = None;
+
+    for c in s.clone().into_inner() {
+        match c.as_rule() {
+            Rule::expr => exprs.push(parse_expr(c)?),
+            Rule::type_ref => ty = Some(parse_type(c)?),
+            Rule::arg_list => {
+                let mut al = Vec::new();
+                for e in c.into_inner() {
+                    al.push(parse_expr(e)?);
+                }
+                exprs = al;
+            }
+            _ => {}
+        }
+    }
+
+    let head = s.as_str().trim_start();
+    if head.starts_with("assert_range") {
+        if exprs.len() != 1 {
+            return Err(anyhow!("assert_range expects exactly one value"));
+        }
+        let ty = ty.ok_or_else(|| anyhow!("assert_range missing range type"))?;
+        return Ok(Stmt::AssertRange {
+            value: exprs.remove(0),
+            ty,
+        });
+    }
+
+    if head.starts_with("assert_zero") {
+        if exprs.len() != 1 {
+            return Err(anyhow!("assert_zero expects exactly one argument"));
+        }
+        return Ok(Stmt::AssertZero(exprs.remove(0)));
+    }
+
+    match exprs.len() {
+        1 => Ok(Stmt::AssertBool(exprs.remove(0))),
+        2 => {
+            let rhs = exprs.pop().unwrap();
+            let lhs = exprs.pop().unwrap();
+            Ok(Stmt::AssertEq(lhs, rhs))
+        }
+        _ => Err(anyhow!("invalid assert statement")),
+    }
+}
+
 /// Parse a call statement `lvalue call_tail`.
 fn parse_call_stmt(call: Pair<Rule>) -> Result<Stmt> {
     let mut it = call.into_inner();
@@ -441,6 +466,34 @@ fn parse_call_stmt(call: Pair<Rule>) -> Result<Stmt> {
         }
     } else {
         return Err(anyhow!("missing call_tail"));
+    }
+
+    // Builtin lookup dispatch: `lookup(ByteChip, opcode, ...)`.
+    if lv.head.len() == 1 && lv.head[0].eq_ignore_ascii_case("lookup") && lv.tails.is_empty() {
+        if args.len() < 2 {
+            return Err(anyhow!("lookup requires at least a chip and opcode"));
+        }
+
+        let mut iter = args.into_iter();
+        let chip_expr = iter.next().unwrap();
+        let opcode = iter.next().unwrap();
+        let rest: Vec<_> = iter.collect();
+
+        let chip_path = match chip_expr {
+            Expr::Path { segments, .. } => segments,
+            other => {
+                return Err(anyhow!(
+                    "lookup first argument must be a chip identifier path, got {:?}",
+                    other
+                ));
+            }
+        };
+
+        return Ok(Stmt::Lookup {
+            chip: chip_path,
+            opcode,
+            args: rest,
+        });
     }
 
     Ok(Stmt::Call { callee: lv, args })

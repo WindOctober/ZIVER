@@ -95,6 +95,17 @@ impl BoolExpr {
                 a.rewrite_var_sort(target, new_ty),
                 b.rewrite_var_sort(target, new_ty),
             ),
+            BoolExpr::Range {
+                value,
+                min,
+                max,
+                bits,
+            } => BoolExpr::Range {
+                value: value.rewrite_var_sort(target, new_ty),
+                min,
+                max,
+                bits,
+            },
         }
     }
 }

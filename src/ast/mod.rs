@@ -135,6 +135,16 @@ pub enum Stmt {
     },
     AssertBool(Expr),
     AssertEq(Expr, Expr),
+    AssertZero(Expr),
+    AssertRange {
+        value: Expr,
+        ty: Type,
+    },
+    Lookup {
+        chip: Vec<String>,
+        opcode: Expr,
+        args: Vec<Expr>,
+    },
     Call {
         callee: LValue,
         args: Vec<Expr>,
