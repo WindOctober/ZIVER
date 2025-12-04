@@ -1,0 +1,190 @@
+const usize WORD_SIZE = 4;
+const field BASE = 256;
+
+Struct Add4Operation {
+    output value: [field; WORD_SIZE],
+    output carry: [field; WORD_SIZE],
+    output is_carry_0: [field; WORD_SIZE],
+    output is_carry_1: [field; WORD_SIZE],
+    output is_carry_2: [field; WORD_SIZE],
+    output is_carry_3: [field; WORD_SIZE],
+}
+
+Component Add4Operation {
+
+    Computation populate(
+        self,
+        a: [field; WORD_SIZE],
+        b: [field; WORD_SIZE],
+        c: [field; WORD_SIZE],
+        d: [field; WORD_SIZE]
+    ) {
+        // Range check inputs.
+        for i in 0..WORD_SIZE {
+            assert_range(a[i], u8);
+            assert_range(b[i], u8);
+            assert_range(c[i], u8);
+            assert_range(d[i], u8);
+        }
+
+        // Byte 0
+        field sum0 = a[0] + b[0] + c[0] + d[0];
+        field carry0 = 0;
+        if (sum0 >= BASE * 3) {
+            sum0 = sum0 - BASE * 3;
+            carry0 = 3;
+        } else {
+            if (sum0 >= BASE * 2) {
+                sum0 = sum0 - BASE * 2;
+                carry0 = 2;
+            } else {
+                if (sum0 >= BASE) {
+                    sum0 = sum0 - BASE;
+                    carry0 = 1;
+                } else {
+                    carry0 = 0;
+                }
+            }
+        }
+        self.value[0] = sum0;
+        self.carry[0] = carry0;
+        self.is_carry_0[0] = (carry0 == 0);
+        self.is_carry_1[0] = (carry0 == 1);
+        self.is_carry_2[0] = (carry0 == 2);
+        self.is_carry_3[0] = (carry0 == 3);
+
+        // Byte 1
+        field sum1 = a[1] + b[1] + c[1] + d[1] + carry0;
+        field carry1 = 0;
+        if (sum1 >= BASE * 3) {
+            sum1 = sum1 - BASE * 3;
+            carry1 = 3;
+        } else {
+            if (sum1 >= BASE * 2) {
+                sum1 = sum1 - BASE * 2;
+                carry1 = 2;
+            } else {
+                if (sum1 >= BASE) {
+                    sum1 = sum1 - BASE;
+                    carry1 = 1;
+                } else {
+                    carry1 = 0;
+                }
+            }
+        }
+        self.value[1] = sum1;
+        self.carry[1] = carry1;
+        self.is_carry_0[1] = (carry1 == 0);
+        self.is_carry_1[1] = (carry1 == 1);
+        self.is_carry_2[1] = (carry1 == 2);
+        self.is_carry_3[1] = (carry1 == 3);
+
+        // Byte 2
+        field sum2 = a[2] + b[2] + c[2] + d[2] + carry1;
+        field carry2 = 0;
+        if (sum2 >= BASE * 3) {
+            sum2 = sum2 - BASE * 3;
+            carry2 = 3;
+        } else {
+            if (sum2 >= BASE * 2) {
+                sum2 = sum2 - BASE * 2;
+                carry2 = 2;
+            } else {
+                if (sum2 >= BASE) {
+                    sum2 = sum2 - BASE;
+                    carry2 = 1;
+                } else {
+                    carry2 = 0;
+                }
+            }
+        }
+        self.value[2] = sum2;
+        self.carry[2] = carry2;
+        self.is_carry_0[2] = (carry2 == 0);
+        self.is_carry_1[2] = (carry2 == 1);
+        self.is_carry_2[2] = (carry2 == 2);
+        self.is_carry_3[2] = (carry2 == 3);
+
+        // Byte 3
+        field sum3 = a[3] + b[3] + c[3] + d[3] + carry2;
+        field carry3 = 0;
+        if (sum3 >= BASE * 3) {
+            sum3 = sum3 - BASE * 3;
+            carry3 = 3;
+        } else {
+            if (sum3 >= BASE * 2) {
+                sum3 = sum3 - BASE * 2;
+                carry3 = 2;
+            } else {
+                if (sum3 >= BASE) {
+                    sum3 = sum3 - BASE;
+                    carry3 = 1;
+                } else {
+                    carry3 = 0;
+                }
+            }
+        }
+        self.value[3] = sum3;
+        self.carry[3] = carry3;
+        self.is_carry_0[3] = (carry3 == 0);
+        self.is_carry_1[3] = (carry3 == 1);
+        self.is_carry_2[3] = (carry3 == 2);
+        self.is_carry_3[3] = (carry3 == 3);
+}
+
+    Constraint eval(
+        cols: Add4Operation,
+        a: [field; WORD_SIZE],
+        b: [field; WORD_SIZE],
+        c: [field; WORD_SIZE],
+        d: [field; WORD_SIZE],
+        is_real: Selector
+    ) {
+        field one = 1;
+        field two = 2;
+        field three = 3;
+
+        assert_bool(is_real);
+
+        for i in 0..WORD_SIZE {
+            // is_carry_* form a one-hot encoding.
+            assert_bool(cols.is_carry_0[i]);
+            assert_bool(cols.is_carry_1[i]);
+            assert_bool(cols.is_carry_2[i]);
+            assert_bool(cols.is_carry_3[i]);
+            assert_eq(
+                cols.is_carry_0[i] + cols.is_carry_1[i] + cols.is_carry_2[i] + cols.is_carry_3[i],
+                one
+            );
+
+            // Carry value reconstructed from one-hot flags.
+            assert_eq(
+                cols.carry[i],
+                cols.is_carry_1[i] * one + cols.is_carry_2[i] * two + cols.is_carry_3[i] * three
+            );
+        }
+
+        // Sum consistency per byte: overflow equals carry * BASE.
+        field overflow_0 = a[0] + b[0] + c[0] + d[0] - cols.value[0];
+        field overflow_1 = a[1] + b[1] + c[1] + d[1] + cols.carry[0] - cols.value[1];
+        field overflow_2 = a[2] + b[2] + c[2] + d[2] + cols.carry[1] - cols.value[2];
+        field overflow_3 = a[3] + b[3] + c[3] + d[3] + cols.carry[2] - cols.value[3];
+
+        assert_eq(overflow_0, cols.carry[0] * BASE);
+        assert_eq(overflow_1, cols.carry[1] * BASE);
+        assert_eq(overflow_2, cols.carry[2] * BASE);
+        assert_eq(overflow_3, cols.carry[3] * BASE);
+
+        // Range checks through ByteChip lookups.
+        for i in 0..WORD_SIZE {
+            lookup(ByteChip, 0, 0, a[i], b[i]);
+            lookup(ByteChip, 0, 0, c[i], d[i]);
+            lookup(ByteChip, 0, 0, cols.value[i], 0);
+        }
+    }
+
+    Query(
+        populate, self, a, b, c, d;
+        eval, cols, a, b, c, d
+    )
+}

@@ -46,6 +46,9 @@ impl Type {
             Type::Array(_, _) => {
                 panic!("array type is not supported in {ctx}: requires allocation semantics");
             }
+            Type::Map { .. } => {
+                panic!("map type is not supported in {ctx}: requires allocation semantics");
+            }
             Type::Function { .. } => {
                 panic!("function type is not first-class in {ctx}");
             }
@@ -66,6 +69,7 @@ impl Type {
             Type::Path { .. } => {
                 matches!(ctx.classify_type(self), Ok(PathKind::Builtin))
             }
+            Type::Map { .. } => false,
             _ => false,
         }
     }

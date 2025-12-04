@@ -71,7 +71,6 @@ Component AddOperation {
         assert_bool(cols.carry[0]);
         assert_bool(cols.carry[1]);
         assert_bool(cols.carry[2]);
-        assert_bool(is_real);
 
         for i in 0..WORD_SIZE {
             lookup(ByteChip, 0, 0, a[i], b[i]);

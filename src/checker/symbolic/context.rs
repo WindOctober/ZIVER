@@ -152,6 +152,9 @@ impl Context {
                 if last == "field" || last == "f" {
                     return Some(SymType::F);
                 }
+                if last == "timestamp" {
+                    return Some(SymType::Uint(64));
+                }
                 if let Some(bits) = last.strip_prefix('u') {
                     let w = bits.parse::<usize>().ok()?;
                     return Some(SymType::Uint(w));
@@ -165,6 +168,15 @@ impl Context {
             }
             Ok(PathKind::Struct(_)) => None,
             Err(_) => None,
+        }
+    }
+
+    /// Return a builtin constant (value, type) by name, if supported.
+    pub fn builtin_const(&self, name: &str) -> Option<(SymExpr, Type)> {
+        match name.to_ascii_lowercase().as_str() {
+            "one" => Some((SymExpr::Int(1), self.builtin_field_type())),
+            "zero" => Some((SymExpr::Int(0), self.builtin_field_type())),
+            _ => None,
         }
     }
 
@@ -281,12 +293,14 @@ impl Context {
                     | "f"
                     | "u8"
                     | "u16"
+                    | "u24"
                     | "u32"
                     | "u64"
                     | "u128"
                     | "i32"
                     | "i64"
                     | "selector"
+                    | "timestamp"
             )
         }
 
@@ -314,7 +328,7 @@ impl Context {
             // Boolean literals: builtin bool type.
             Expr::Bool(_) => Some(self.builtin_bool_type()),
 
-            Expr::Path { ref_id, .. } => {
+            Expr::Path { ref_id, segments } => {
                 if let Some(id) = *ref_id {
                     if let Some(ty) = self.types.var_types.get(&id) {
                         return Some(ty.clone());
@@ -324,6 +338,12 @@ impl Context {
                     }
                     if self.funcs.contains_key(&id) {
                         return Some(Type::Function { ref_id: Some(id) });
+                    }
+                }
+                // Fallback to known builtin constants (e.g., `one`, `zero`).
+                if let Some(last) = segments.last() {
+                    if let Some((_val, ty)) = self.builtin_const(last) {
+                        return Some(ty);
                     }
                 }
                 None
@@ -347,6 +367,13 @@ impl Context {
             Expr::Index(base, _idx) => {
                 if let Some(Type::Array(inner, _)) = self.infer_expr_type_static(base) {
                     return Some((*inner).clone());
+                }
+                None
+            }
+
+            Expr::MapIndex { base, .. } => {
+                if let Some(Type::Map { value, .. }) = self.infer_expr_type_static(base) {
+                    return Some((*value).clone());
                 }
                 None
             }
@@ -631,6 +658,13 @@ fn resolve_expr_ids_flat(e: &mut Expr, scope: &Scope, ctx: &mut Context) {
             resolve_expr_ids_flat(idx, scope, ctx);
         }
 
+        Expr::MapIndex { base, keys } => {
+            resolve_expr_ids_flat(base, scope, ctx);
+            for k in keys.iter_mut() {
+                resolve_expr_ids_flat(k, scope, ctx);
+            }
+        }
+
         Expr::Field { base, name, ref_id } => {
             resolve_expr_ids_flat(base, scope, ctx);
 
@@ -678,6 +712,15 @@ fn resolve_type_ids_flat(ty: &mut Type, scope: &Scope, ctx: &mut Context) {
         Type::Array(inner, len_expr) => {
             resolve_type_ids_flat(inner, scope, ctx);
             resolve_expr_ids_flat(len_expr, scope, ctx); // allow const exprs in length
+        }
+        Type::Map {
+            timestamp,
+            key,
+            value,
+        } => {
+            resolve_type_ids_flat(timestamp, scope, ctx);
+            resolve_type_ids_flat(key, scope, ctx);
+            resolve_type_ids_flat(value, scope, ctx);
         }
         Type::Function { ref_id: _ } => {
             // Function type only carries id; nothing to resolve here.
@@ -741,7 +784,7 @@ fn resolve_stmt_ids_flat(s: &mut Stmt, ctx: &mut Context, scope: &mut Scope) {
             ctx.types.var_types.insert(nid, ty.clone());
         }
         Stmt::Assign { target, value } | Stmt::AndAssign { target, value } => {
-            resolve_lvalue_ids_flat(target, scope);
+            resolve_lvalue_ids_flat(target, scope, ctx);
             resolve_expr_ids_flat(value, scope, ctx);
         }
         Stmt::For {
@@ -801,7 +844,7 @@ fn resolve_stmt_ids_flat(s: &mut Stmt, ctx: &mut Context, scope: &mut Scope) {
             }
         }
         Stmt::Call { callee, args } => {
-            resolve_lvalue_ids_flat(callee, scope);
+            resolve_lvalue_ids_flat(callee, scope, ctx);
             for a in args.iter_mut() {
                 resolve_expr_ids_flat(a, scope, ctx);
             }
@@ -811,6 +854,16 @@ fn resolve_stmt_ids_flat(s: &mut Stmt, ctx: &mut Context, scope: &mut Scope) {
 }
 
 /// Resolve the lvalue head now; field tails are deferred to exec-time.
-fn resolve_lvalue_ids_flat(lv: &mut LValue, scope: &Scope) {
+fn resolve_lvalue_ids_flat(lv: &mut LValue, scope: &Scope, ctx: &mut Context) {
     lv.ref_id = scope.resolve_path(&lv.head);
+    for tail in lv.tails.iter_mut() {
+        match tail {
+            LvTail::Index(idx) => resolve_expr_ids_flat(idx, scope, ctx),
+            LvTail::MapIndex(k1, k2) => {
+                resolve_expr_ids_flat(k1, scope, ctx);
+                resolve_expr_ids_flat(k2, scope, ctx);
+            }
+            _ => {}
+        }
+    }
 }

@@ -1,10 +1,11 @@
 use im::HashMap as IMap;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use crate::ast::*;
 use crate::checker::symbolic::context::{Context, PathKind};
 use crate::checker::symbolic::eval_index_const_or_err;
+use crate::checker::symbolic::expr::FIELD_MODULUS;
 use crate::checker::symbolic::expr::{BoolExpr, SymExpr, SymType};
 
 /// Persistent store node for symbolic memory.
@@ -165,6 +166,33 @@ pub enum ExecStatus {
     Return,
 }
 
+/// Memory interaction kind (Send/Receive) captured during execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryEventKind {
+    Send,
+    Receive,
+}
+
+/// Cached map read entry to keep clk_prev/value consistent across projections.
+#[derive(Clone, Debug)]
+pub struct MapReadRecord {
+    pub base_id: Option<i64>,
+    pub base_repr: String,
+    pub clk: SymExpr,
+    pub addr: SymExpr,
+    pub clk_prev: SymExpr,
+    pub value: SymExpr,
+}
+
+/// A single memory access record collected from lookups or map reads.
+#[derive(Clone, Debug)]
+pub struct MemoryEvent {
+    pub kind: MemoryEventKind,
+    pub clk: SymExpr,
+    pub addr: SymExpr,
+    pub value: SymExpr,
+}
+
 /// Symbolic state with path condition and persistent store.
 #[derive(Clone, Debug)]
 pub struct SymState {
@@ -172,6 +200,10 @@ pub struct SymState {
     pub path_cond: Vec<BoolExpr>,
     pub store: Store,
     pub status: ExecStatus,
+    pub memory_events: Vec<MemoryEvent>,
+    pub map_reads: Vec<MapReadRecord>,
+    bit_decomp_cache: HashMap<String, Vec<SymExpr>>,
+    range_hints: HashMap<String, (i128, i128)>,
     fresh: usize,
 }
 
@@ -182,6 +214,10 @@ impl SymState {
             path_cond: Vec::new(),
             store: Store::default(),
             status: ExecStatus::Step,
+            memory_events: Vec::new(),
+            map_reads: Vec::new(),
+            bit_decomp_cache: HashMap::new(),
+            range_hints: HashMap::new(),
             fresh: 0,
         }
     }
@@ -200,7 +236,267 @@ impl SymState {
 
     /// Return a new state with an additional path constraint appended.
     pub fn with_pc(mut self, cond: BoolExpr) -> Self {
+        // Harvest simple range hints attached to individual variables.
+        match &cond {
+            BoolExpr::Range {
+                value, min, max, ..
+            } => {
+                self.record_range_hint(value, *min, *max);
+            }
+            BoolExpr::Eq(a, b) => {
+                self.record_eq_hint(a, b);
+                self.record_eq_hint(b, a);
+            }
+            _ => {}
+        };
         self.path_cond.push(cond);
+        self
+    }
+
+    fn cache_key_for_expr(value: &SymExpr) -> String {
+        match value {
+            SymExpr::Var(name, _) => format!("var:{name}"),
+            other => format!("expr:{other:?}"),
+        }
+    }
+
+    fn record_range_hint(&mut self, value: &SymExpr, min: i128, max: i128) {
+        if min > max {
+            return;
+        }
+        if let SymExpr::Var(name, _) = value {
+            self.range_hints
+                .entry(name.clone())
+                .and_modify(|(lo, hi)| {
+                    let new_lo = std::cmp::max(*lo, min);
+                    let new_hi = std::cmp::min(*hi, max);
+                    if new_lo <= new_hi {
+                        *lo = new_lo;
+                        *hi = new_hi;
+                    }
+                })
+                .or_insert((min, max));
+        }
+    }
+
+    fn record_eq_hint(&mut self, a: &SymExpr, b: &SymExpr) {
+        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (a, b) {
+            self.record_range_hint(&SymExpr::Var(name.clone(), SymType::Bool), *k, *k);
+        }
+    }
+
+    /// Lookup a recorded range for a variable, if any.
+    fn hint_for_var(&self, name: &str) -> Option<(i128, i128)> {
+        self.range_hints.get(name).copied()
+    }
+
+    fn symtype_range(sty: &SymType) -> Option<(i128, i128)> {
+        match *sty {
+            SymType::Bool => Some((0, 1)),
+            SymType::Uint(w) if w > 0 && w < 127 => {
+                let max = 1_i128.checked_shl(w as u32)?.saturating_sub(1);
+                Some((0, max))
+            }
+            SymType::Int(w) if w > 0 && w < 127 => {
+                let hi = 1_i128.checked_shl((w - 1) as u32)?.saturating_sub(1);
+                let lo = -(1_i128.checked_shl((w - 1) as u32)?);
+                Some((lo, hi))
+            }
+            SymType::F => Some((0, FIELD_MODULUS - 1)),
+            _ => None,
+        }
+    }
+
+    fn range_add(a: (i128, i128), b: (i128, i128)) -> Option<(i128, i128)> {
+        a.0.checked_add(b.0)
+            .and_then(|lo| a.1.checked_add(b.1).map(|hi| (lo, hi)))
+    }
+
+    fn range_sub(a: (i128, i128), b: (i128, i128)) -> Option<(i128, i128)> {
+        a.0.checked_sub(b.1)
+            .and_then(|lo| a.1.checked_sub(b.0).map(|hi| (lo, hi)))
+    }
+
+    fn range_mul(a: (i128, i128), b: (i128, i128)) -> Option<(i128, i128)> {
+        let cands = [
+            a.0.checked_mul(b.0)?,
+            a.0.checked_mul(b.1)?,
+            a.1.checked_mul(b.0)?,
+            a.1.checked_mul(b.1)?,
+        ];
+        let lo = *cands.iter().min()?;
+        let hi = *cands.iter().max()?;
+        Some((lo, hi))
+    }
+
+    /// Conservative range inference for a symbolic expression using recorded hints.
+    /// Returns (min, max) if a finite interval can be derived.
+    pub fn symexpr_range(&self, e: &SymExpr) -> Option<(i128, i128)> {
+        match e {
+            SymExpr::Int(k) => Some((*k, *k)),
+            SymExpr::Var(name, sty) => {
+                if let Some(h) = self.hint_for_var(name) {
+                    return Some(h);
+                }
+                Self::symtype_range(sty)
+            }
+            SymExpr::Neg(inner) => {
+                let (lo, hi) = self.symexpr_range(inner)?;
+                Some((-hi, -lo))
+            }
+            SymExpr::Add(xs) => {
+                let mut acc = Some((0_i128, 0_i128));
+                for x in xs {
+                    let xr = self.symexpr_range(x)?;
+                    acc = acc.and_then(|a| Self::range_add(a, xr));
+                }
+                acc
+            }
+            SymExpr::Mul(xs) => {
+                let mut it = xs.iter();
+                let first = self.symexpr_range(it.next()?)?;
+                let mut acc = first;
+                for x in it {
+                    let xr = self.symexpr_range(x)?;
+                    acc = match Self::range_mul(acc, xr) {
+                        Some(r) => r,
+                        None => return None,
+                    };
+                }
+                Some(acc)
+            }
+            SymExpr::Sub(a, b) => {
+                let ra = self.symexpr_range(a)?;
+                let rb = self.symexpr_range(b)?;
+                Self::range_sub(ra, rb)
+            }
+            SymExpr::Div(a, b) => {
+                // Very conservative: if divisor range straddles 0 or is unknown, give up.
+                let ra = self.symexpr_range(a)?;
+                let rb = self.symexpr_range(b)?;
+                if rb.0 <= 0 && rb.1 >= 0 {
+                    return None;
+                }
+                // Use bounds via endpoints.
+                let cands = [
+                    ra.0.checked_div(rb.0)?,
+                    ra.0.checked_div(rb.1)?,
+                    ra.1.checked_div(rb.0)?,
+                    ra.1.checked_div(rb.1)?,
+                ];
+                let lo = *cands.iter().min()?;
+                let hi = *cands.iter().max()?;
+                Some((lo, hi))
+            }
+            SymExpr::Ite(_, t, e) => {
+                let rt = self.symexpr_range(t)?;
+                let re = self.symexpr_range(e)?;
+                Some((std::cmp::min(rt.0, re.0), std::cmp::max(rt.1, re.1)))
+            }
+            SymExpr::Mod(_, m) => {
+                if let SymExpr::Int(k) = **m {
+                    if k > 0 {
+                        return Some((0, k - 1));
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Decompose a u32 value into Boolean bits, reusing prior decompositions of the same value.
+    pub fn decompose_u32_bits_cached(
+        mut self,
+        value: SymExpr,
+        prefix: &str,
+    ) -> (Vec<SymExpr>, SymState) {
+        let key = Self::cache_key_for_expr(&value);
+        if let Some(bits) = self.bit_decomp_cache.get(&key) {
+            return (bits.clone(), self);
+        }
+
+        let mut bits = Vec::with_capacity(32);
+        let mut acc = SymExpr::Int(0);
+        for i in 0..32 {
+            let bit = self.fresh_sym(&format!("{}_{}", prefix, i), SymType::Bool);
+            self = self.with_pc(BoolExpr::Range {
+                value: bit.clone(),
+                min: 0,
+                max: 1,
+                bits: Some(1),
+            });
+            acc = acc + bit.clone() * SymExpr::Int(1_i128 << i);
+            bits.push(bit);
+        }
+
+        self = self.with_pc(BoolExpr::Range {
+            value: value.clone(),
+            min: 0,
+            max: (1_i128 << 32) - 1,
+            bits: Some(32),
+        });
+        self = self.with_pc(value.eq_to(acc));
+        self.bit_decomp_cache.insert(key, bits.clone());
+
+        (bits, self)
+    }
+
+    /// Append a memory event to the trace and return the updated state.
+    pub fn add_memory_event(
+        mut self,
+        kind: MemoryEventKind,
+        clk: SymExpr,
+        addr: SymExpr,
+        value: SymExpr,
+    ) -> Self {
+        self.memory_events.push(MemoryEvent {
+            kind,
+            clk,
+            addr,
+            value,
+        });
+        self
+    }
+
+    /// View the accumulated memory trace.
+    pub fn memory_trace(&self) -> &[MemoryEvent] {
+        &self.memory_events
+    }
+
+    /// Look up a cached map read by base and keys.
+    pub fn find_map_read(
+        &self,
+        base_id: Option<i64>,
+        base_repr: &str,
+        clk: &SymExpr,
+        addr: &SymExpr,
+    ) -> Option<(SymExpr, SymExpr)> {
+        self.map_reads
+            .iter()
+            .find(|r| {
+                r.base_id == base_id && r.base_repr == base_repr && r.clk == *clk && r.addr == *addr
+            })
+            .map(|r| (r.clk_prev.clone(), r.value.clone()))
+    }
+
+    /// Cache a new map read result.
+    pub fn record_map_read(
+        mut self,
+        base_id: Option<i64>,
+        base_repr: String,
+        clk: SymExpr,
+        addr: SymExpr,
+        clk_prev: SymExpr,
+        value: SymExpr,
+    ) -> Self {
+        self.map_reads.push(MapReadRecord {
+            base_id,
+            base_repr,
+            clk,
+            addr,
+            clk_prev,
+            value,
+        });
         self
     }
 
@@ -467,6 +763,11 @@ impl SymState {
                     // with constant index will still panic if element was never written.
                     None => StoreNode::array(None),
                 }
+            }
+
+            // Map types are treated as opaque scalars; their contents are not modeled symbolically.
+            Type::Map { .. } => {
+                StoreNode::scalar(self.fresh_sym(&format!("{hint}_map"), SymType::F))
             }
 
             // Function types are not allowed in value allocation; report as unimplemented.

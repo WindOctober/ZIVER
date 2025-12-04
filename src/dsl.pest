@@ -17,8 +17,9 @@ const_decl  = { "const" ~ type_ref ~ ident ~ "=" ~ expr ~ ";" }
 
 // === Types ===
 // A type can be an identifier path or an array type.
-type_ref   = { array_ty | path }
+type_ref   = { array_ty | map_ty | path }
 array_ty   = { "[" ~ type_ref ~ ";" ~ expr ~ "]" }
+map_ty     = { "map" ~ "<" ~ type_ref ~ "," ~ type_ref ~ "," ~ type_ref ~ ">" }
 
 // === Path ===
 // A path may contain multiple segments separated by '::'.
@@ -57,7 +58,7 @@ var_decl  = { type_ref ~ ident ~ "=" ~ expr ~ ";" }
 assign    = { lvalue ~ "="  ~ expr ~ ";" }
 and_assign = { lvalue ~ "&=" ~ expr ~ ";" }
 
-lvalue     = { path ~ ( field_tail | index_tail )* }
+lvalue     = { path ~ ( field_tail | map_index_tail | index_tail )* }
 range    = { expr ~ ".." ~ expr }
 for_loop = { "for" ~ ident ~ "in" ~ range ~ block }
 if_stmt  = { "if" ~ expr ~ block ~ ( "else" ~ block )? }
@@ -77,6 +78,7 @@ arg_list  = { expr ~ ("," ~ expr)* ~ (",")? }
 
 call_tail  = { "(" ~ (arg_list)? ~ ")" }
 index_tail = { "[" ~ expr ~ "]" }
+map_index_tail = { "[" ~ expr ~ "," ~ expr ~ "]" }
 field_tail = { "." ~ ident }
 
 return_stmt = { "return" ~ expr ~ ";" }
@@ -86,5 +88,5 @@ return_stmt = { "return" ~ expr ~ ";" }
 expr = { postfix ~ ( op ~ postfix )* }
 op   = { "&&" | "||" | "==" | "!=" | "<=" | ">=" | "<" | ">" | "&" | "*" | "+" | "-" }
 
-postfix  = { primary ~ ( call_tail | index_tail | field_tail )* }
+postfix  = { primary ~ ( call_tail | map_index_tail | index_tail | field_tail )* }
 primary  = { int | bool | path | "(" ~ expr ~ ")" }

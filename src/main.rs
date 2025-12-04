@@ -3,6 +3,7 @@ mod checker;
 pub mod parser;
 mod utils;
 use clap::{ArgAction, Parser};
+use std::env;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -38,7 +39,7 @@ pub struct Args {
     pub type_opt: bool,
 
     /// Select SMT solver backend: "z3_nia" or "cvc5_ff".
-    #[arg(long, value_name = "SOLVER", default_value = "cvc5_ff")]
+    #[arg(long, value_name = "SOLVER", default_value = "z3_nia")]
     pub solver: String,
 
     /// Command or path used to invoke cvc5 when `--solver cvc5_ff` is selected.
@@ -49,11 +50,16 @@ pub struct Args {
 fn main() {
     let args = Args::parse();
     let config = derive_config(args.clone());
+    let trace = env::var("CZC_TRACE").is_ok();
 
     // Require a path to resolve imports on disk.
     let entry_path = args
         .input
         .unwrap_or_else(|| PathBuf::from("benchmark/IsZeroWordOperation/is_zero_word.cz"));
+
+    if trace {
+        eprintln!("CZC_TRACE: resolving entry {:?}", entry_path);
+    }
 
     // Resolve and parse the entry + imports.
     let mut modules =
@@ -65,13 +71,76 @@ fn main() {
             }
         };
 
+    if trace {
+        eprintln!("CZC_TRACE: parsed {} modules", modules.len());
+    }
+
     // Build Context across all modules.
     let ctx = Rc::new(init_context(&mut modules));
+
+    if trace {
+        eprintln!(": context initialized, starting equivalence check");
+    }
 
     if let Err(err) = check_equivalence(&modules[0].file, Rc::clone(&ctx), config) {
         eprintln!("✖ Equivalence check failed: {err}");
         std::process::exit(1);
     } else {
         println!("✔ Equivalence check passed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        checker::check_equivalence, checker::symbolic::context::init_context,
+        utils::module_resolver::resolve_and_parse_modules,
+    };
+    use std::rc::Rc;
+
+    fn run_case(path: &str, solver: &str) {
+        let args = Args {
+            input: Some(PathBuf::from(path)),
+            ast: false,
+            type_opt: true,
+            solver: solver.to_string(),
+            cvc5_cmd: "cvc5".to_string(),
+        };
+        let config = derive_config(args.clone());
+
+        // Resolve and parse modules rooted at the benchmark file.
+        let mut modules =
+            resolve_and_parse_modules(args.input.as_ref().unwrap(), &[]).expect("parse failed");
+
+        let ctx = Rc::new(init_context(&mut modules));
+
+        if let Err(e) = check_equivalence(&modules[0].file, Rc::clone(&ctx), config) {
+            panic!(
+                "equivalence check for {} with {} failed: {}",
+                path, solver, e
+            );
+        }
+    }
+
+    #[test]
+    fn component_benchmarks_without_add4() {
+        // Backend mapping mirrors the benchmark script but skips add4 (too slow for tests).
+        let cases = vec![
+            ("benchmark/Component/Add/add.cz", "z3_nia"),
+            (
+                "benchmark/Component/IsEqualWordOperation/is_equal.cz",
+                "cvc5_ff",
+            ),
+            ("benchmark/Component/IsZeroOperation/is_zero.cz", "cvc5_ff"),
+            (
+                "benchmark/Component/IsZeroWordOperation/is_zero_word.cz",
+                "cvc5_ff",
+            ),
+        ];
+
+        for (path, solver) in cases {
+            run_case(path, solver);
+        }
     }
 }

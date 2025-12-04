@@ -99,6 +99,12 @@ pub enum Type {
     },
     /// Array type
     Array(Box<Type>, Expr),
+    /// Map type with (timestamp, key, value) sub-types.
+    Map {
+        timestamp: Box<Type>,
+        key: Box<Type>,
+        value: Box<Type>,
+    },
     /// First-class function type; `ref_id` resolves to the function declaration id.
     Function { ref_id: Option<i64> },
 }
@@ -165,6 +171,7 @@ pub enum LvTail {
     // field access
     Field { name: String },
     Index(Expr),
+    MapIndex(Expr, Expr), // two-key map index (timestamp, addr)
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +187,11 @@ pub enum Expr {
 
     Call(Box<Expr>, Vec<Expr>),
     Index(Box<Expr>, Box<Expr>),
+    /// Map access with a tuple key (timestamp, address).
+    MapIndex {
+        base: Box<Expr>,
+        keys: Vec<Expr>, // expected arity: 2
+    },
 
     // field access with ref_id to Field
     Field {

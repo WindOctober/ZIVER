@@ -6,7 +6,7 @@ use crate::{
         context::{Context, PathKind},
         eval_index_const_or_err,
         expr::{BoolExpr, FIELD_MODULUS, SymExpr, SymType},
-        state::{ExecStatus, Store, StoreNode, SymState},
+        state::{ExecStatus, MemoryEventKind, Store, StoreNode, SymState},
     },
     utils::SolverKind,
 };
@@ -39,6 +39,73 @@ fn sym_bounds(sty: &SymType) -> Option<(i128, i128, usize)> {
         }
         _ => None,
     }
+}
+
+/// Drop a field modulus reduction when the inferred range already lies inside the field.
+fn mod_if_needed(expr: SymExpr, state: &SymState) -> SymExpr {
+    if let Some((lo, hi)) = state.symexpr_range(&expr) {
+        if lo >= 0 && hi < FIELD_MODULUS {
+            return expr;
+        }
+    }
+    expr.mod_field()
+}
+
+/// Helper to enforce single-result evaluations.
+fn expect_single<T: Clone>(vals: Vector<T>, ctx: &str) -> T {
+    if vals.len() != 1 {
+        panic!("{} produced {} results (expected 1)", ctx, vals.len());
+    }
+    vals[0].clone()
+}
+
+/// Decompose an 8-bit value into fresh Boolean bits and return (bits, reconstructed_sum, state).
+fn decompose_byte(mut state: SymState, prefix: &str) -> (Vec<SymExpr>, SymExpr, SymState) {
+    let mut bits = Vec::with_capacity(8);
+    let mut acc = SymExpr::Int(0);
+    for i in 0..8 {
+        let bit = state.fresh_sym(&format!("{}_{}", prefix, i), SymType::Bool);
+        state = state.with_pc(BoolExpr::Range {
+            value: bit.clone(),
+            min: 0,
+            max: 1,
+            bits: Some(1),
+        });
+        acc = acc + bit.clone() * SymExpr::Int(1_i128 << (i as u32));
+        bits.push(bit);
+    }
+    (bits, acc, state)
+}
+
+/// Decompose a u32 value into Boolean bits and return (bits, updated_state).
+fn decompose_u32_bits(state: SymState, value: SymExpr, prefix: &str) -> (Vec<SymExpr>, SymState) {
+    state.decompose_u32_bits_cached(value, prefix)
+}
+
+/// Constrain `out = lhs AND rhs` over 8-bit values via bit decomposition.
+fn constrain_byte_and(state: SymState, out: SymExpr, lhs: SymExpr, rhs: SymExpr) -> SymState {
+    let mut state = state;
+    for v in [out.clone(), lhs.clone(), rhs.clone()] {
+        state = state.with_pc(BoolExpr::Range {
+            value: v,
+            min: 0,
+            max: 255,
+            bits: Some(8),
+        });
+    }
+
+    let (lhs_bits, lhs_acc, state) = decompose_byte(state, "byte_and_l");
+    let (rhs_bits, rhs_acc, state) = decompose_byte(state, "byte_and_r");
+    let (out_bits, out_acc, mut state) = decompose_byte(state, "byte_and_out");
+
+    for ((lb, rb), ob) in lhs_bits.iter().zip(rhs_bits.iter()).zip(out_bits.iter()) {
+        let prod = SymExpr::Mul(vec![lb.clone(), rb.clone()]);
+        state = state.with_pc(ob.clone().eq_to(prod));
+    }
+
+    state = state.with_pc(lhs.eq_to(lhs_acc));
+    state = state.with_pc(rhs.eq_to(rhs_acc));
+    state.with_pc(out.eq_to(out_acc))
 }
 
 pub trait SymbolicExecutor {
@@ -147,6 +214,9 @@ fn write_to_lvalue(ctx: &Context, store: Store, lv: &LValue, val: SymExpr) -> St
                     elems: new_elems,
                 }
             }
+            (_, LvTail::MapIndex(_, _)) => {
+                panic!("assignment through map indexing is not supported");
+            }
 
             _ => panic!("lvalue tail does not match node shape"),
         }
@@ -213,17 +283,8 @@ impl SymbolicExecutor for Stmt {
 
                 Expr::Binary { op, lhs, rhs } => {
                     // Sequential: eval lhs then rhs on resulting state.
-                    let l = lhs.eval(st);
-                    if l.len() != 1 {
-                        panic!("branching in BoolExpr(lhs) unsupported for `{:?}`", op);
-                    }
-                    let (lv, s1) = l[0].clone();
-
-                    let r = rhs.eval(s1);
-                    if r.len() != 1 {
-                        panic!("branching in BoolExpr(rhs) unsupported for `{:?}`", op);
-                    }
-                    let (rv, s2) = r[0].clone();
+                    let (lv, s1) = expect_single(lhs.eval(st), "BoolExpr(lhs)");
+                    let (rv, s2) = expect_single(rhs.eval(s1), "BoolExpr(rhs)");
 
                     let cond = match op {
                         BinOp::Eq => lv.eq_to(rv),
@@ -300,17 +361,8 @@ impl SymbolicExecutor for Stmt {
         match self {
             Stmt::AssertEq(a, b) => {
                 // Sequential: lhs → rhs
-                let la = a.eval(st);
-                if la.len() != 1 {
-                    panic!("branching in AssertEq(lhs) unsupported");
-                }
-                let (av, s1) = la[0].clone();
-
-                let lb = b.eval(s1);
-                if lb.len() != 1 {
-                    panic!("branching in AssertEq(rhs) unsupported");
-                }
-                let (bv, s2) = lb[0].clone();
+                let (av, s1) = expect_single(a.eval(st), "AssertEq(lhs)");
+                let (bv, s2) = expect_single(b.eval(s1), "AssertEq(rhs)");
 
                 let cond = av.eq_to(bv);
                 let states = Self::split_on_bool_mul_eq_zero(s2, cond);
@@ -370,11 +422,7 @@ impl SymbolicExecutor for Stmt {
             }
 
             Stmt::AssertZero(e) => {
-                let evals = e.eval(st);
-                if evals.len() != 1 {
-                    panic!("branching in assert_zero is unsupported");
-                }
-                let (v, s1) = evals[0].clone();
+                let (v, s1) = expect_single(e.eval(st), "assert_zero");
                 let cond = v.eq_to(SymExpr::Int(0));
                 let mut out = Vector::new();
                 for s in Self::split_on_bool_mul_eq_zero(s1, cond) {
@@ -435,11 +483,7 @@ impl SymbolicExecutor for Stmt {
             }
 
             Stmt::Assign { target, value } => {
-                let evals = value.eval(st);
-                if evals.len() != 1 {
-                    panic!("branching RHS in Assign unsupported");
-                }
-                let (v, mut s1) = evals[0].clone();
+                let (v, mut s1) = expect_single(value.eval(st), "Assign RHS");
                 s1.store = write_to_lvalue(&s1.ctx, s1.store.clone(), &target, v);
                 Vector::unit((None, s1))
             }
@@ -530,17 +574,17 @@ impl SymbolicExecutor for Stmt {
                 // Enforce that the loop bounds are compile-time constants
                 // (literals or constant identifiers).
                 let lo = eval_index_const_or_err(&st.ctx, None, &start).unwrap_or_else(|| {
-        panic!(
-            "for-loop lower bound must be a constant integer or const identifier: `{:?}`",
-            start
-        )
-    });
+                    panic!(
+                        "for-loop lower bound must be a constant integer or const identifier: `{:?}`",
+                        start
+                    )
+                });
                 let hi = eval_index_const_or_err(&st.ctx, None, &end).unwrap_or_else(|| {
-        panic!(
-            "for-loop upper bound must be a constant integer or const identifier: `{:?}`",
-            end
-        )
-    });
+                    panic!(
+                        "for-loop upper bound must be a constant integer or const identifier: `{:?}`",
+                        end
+                    )
+                });
 
                 // Rust-style semantics: if lo >= hi, the loop body is skipped.
                 if lo >= hi {
@@ -635,58 +679,97 @@ impl SymbolicExecutor for Stmt {
                 out
             }
             Stmt::Lookup { chip, opcode, args } => {
-                let is_byte_chip = chip
+                let chip_name = chip
                     .last()
-                    .map(|c| c.eq_ignore_ascii_case("bytechip"))
-                    .unwrap_or(false);
-                if !is_byte_chip {
+                    .map(|c| c.to_ascii_lowercase())
+                    .unwrap_or_else(|| "".to_string());
+
+                if chip_name == "bytechip" {
+                    if args.len() < 2 {
+                        panic!("ByteChip lookup expects at least two payload arguments");
+                    }
+
+                    let (opcode_val, mut state_after_opcode) =
+                        expect_single(opcode.eval(st), "lookup opcode");
+                    let opcode_int = match opcode_val {
+                        SymExpr::Int(k) => k,
+                        other => panic!("opcode must be an integer literal, got {:?}", other),
+                    };
+
+                    let mut payload_vals = Vec::new();
+                    for e in args.into_iter() {
+                        let (v, s_next) =
+                            expect_single(e.eval(state_after_opcode.clone()), "lookup payload");
+                        payload_vals.push(v);
+                        state_after_opcode = s_next;
+                    }
+
+                    match opcode_int {
+                        0 => {
+                            let len = payload_vals.len();
+                            if len < 2 {
+                                panic!("ByteChip opcode 0 requires two payload values");
+                            }
+
+                            let mut s_cur = state_after_opcode;
+                            for v in payload_vals[len - 2..].iter() {
+                                s_cur = s_cur.with_pc(BoolExpr::Range {
+                                    value: v.clone(),
+                                    min: 0,
+                                    max: 255,
+                                    bits: Some(8),
+                                });
+                            }
+                            Vector::unit((None, s_cur))
+                        }
+                        1 => {
+                            if payload_vals.len() < 3 {
+                                panic!("ByteChip opcode 1 (AND) requires three payload values");
+                            }
+                            let mut s_cur = state_after_opcode;
+                            let out = payload_vals[0].clone();
+                            let lhs = payload_vals[1].clone();
+                            let rhs = payload_vals[2].clone();
+                            s_cur = constrain_byte_and(s_cur, out, lhs, rhs);
+                            Vector::unit((None, s_cur))
+                        }
+                        other => panic!("unsupported ByteChip opcode {}", other),
+                    }
+                } else if chip_name == "send" || chip_name == "receive" {
+                    if args.len() < 3 {
+                        panic!("Memory send/receive expects clk, addr, value");
+                    }
+
+                    let (opcode_val, mut state_after_opcode) =
+                        expect_single(opcode.eval(st), "lookup opcode");
+                    if !matches!(opcode_val, SymExpr::Int(_)) {
+                        panic!(
+                            "memory lookup opcode must be an integer literal, got {:?}",
+                            opcode_val
+                        );
+                    }
+
+                    let mut payload_vals = Vec::new();
+                    for e in args.into_iter() {
+                        let (v, s_next) =
+                            expect_single(e.eval(state_after_opcode.clone()), "lookup payload");
+                        payload_vals.push(v);
+                        state_after_opcode = s_next;
+                    }
+
+                    let clk = payload_vals[0].clone();
+                    let addr = payload_vals[1].clone();
+                    let val = payload_vals[2].clone();
+                    let kind = if chip_name == "send" {
+                        MemoryEventKind::Send
+                    } else {
+                        MemoryEventKind::Receive
+                    };
+
+                    state_after_opcode = state_after_opcode.add_memory_event(kind, clk, addr, val);
+                    Vector::unit((None, state_after_opcode))
+                } else {
                     panic!("unsupported lookup chip `{:?}`", chip);
-                }
-
-                if args.len() < 2 {
-                    panic!("ByteChip lookup expects at least two payload arguments");
-                }
-
-                let opcode_eval = opcode.eval(st);
-                if opcode_eval.len() != 1 {
-                    panic!("opcode evaluation must be deterministic for lookup");
-                }
-                let (opcode_val, mut state_after_opcode) = opcode_eval[0].clone();
-                let opcode_int = match opcode_val {
-                    SymExpr::Int(k) => k,
-                    other => panic!("opcode must be an integer literal, got {:?}", other),
-                };
-
-                let mut payload_vals = Vec::new();
-                for e in args.into_iter() {
-                    let vals = e.eval(state_after_opcode.clone());
-                    if vals.len() != 1 {
-                        panic!("lookup payload evaluation must be deterministic");
-                    }
-                    let (v, s_next) = vals[0].clone();
-                    payload_vals.push(v);
-                    state_after_opcode = s_next;
-                }
-
-                match opcode_int {
-                    0 => {
-                        let len = payload_vals.len();
-                        if len < 2 {
-                            panic!("ByteChip opcode 0 requires two payload values");
-                        }
-
-                        let mut s_cur = state_after_opcode;
-                        for v in payload_vals[len - 2..].iter() {
-                            s_cur = s_cur.with_pc(BoolExpr::Range {
-                                value: v.clone(),
-                                min: 0,
-                                max: 255,
-                                bits: Some(8),
-                            });
-                        }
-                        Vector::unit((None, s_cur))
-                    }
-                    other => panic!("unsupported ByteChip opcode {}", other),
                 }
             }
             Stmt::Call { callee, args } => {
@@ -819,7 +902,7 @@ impl Expr {
             f: F,
         ) -> Vector<(SymExpr, SymState)>
         where
-            F: Fn(SymExpr, SymExpr) -> SymExpr,
+            F: Fn(SymExpr, SymExpr, &SymState) -> SymExpr,
         {
             // First evaluate lhs under the incoming state.
             let l_res = lhs.eval(state);
@@ -837,7 +920,7 @@ impl Expr {
                 }
 
                 for (rv, s2) in r_res {
-                    let combined = f(lv.clone(), rv);
+                    let combined = f(lv.clone(), rv, &s2);
                     out.push_back((combined, s2));
                 }
             }
@@ -857,6 +940,19 @@ impl Expr {
                 }) {
                     return Vector::unit((v, state));
                 }
+                if let Some(cid) = ref_id {
+                    if let Some(k) = state.ctx.const_int(cid) {
+                        return Vector::unit((SymExpr::Int(k as i128), state));
+                    }
+                }
+                if ref_id.is_none() {
+                    if let Some(last) = segments.last() {
+                        if let Some((val, _ty)) = state.ctx.builtin_const(last) {
+                            return Vector::unit((val, state));
+                        }
+                    }
+                    panic!("unresolved path in expression: {:?}", segments);
+                }
                 let id = ref_id.expect("unresolved path in expression");
                 let ty = state
                     .ctx
@@ -869,6 +965,32 @@ impl Expr {
             }
 
             Expr::Field { base, name, .. } => {
+                if let Expr::MapIndex {
+                    base: map_base,
+                    keys,
+                } = base.as_ref()
+                {
+                    if keys.len() != 2 {
+                        panic!("map index expects exactly two keys (timestamp, addr)");
+                    }
+
+                    let (clk_prev, val, s_next) = eval_map_index_projection(
+                        state,
+                        map_base.as_ref(),
+                        keys[0].clone(),
+                        keys[1].clone(),
+                        name.as_str(),
+                    );
+
+                    let out = match name.as_str() {
+                        "clk_prev" => clk_prev,
+                        "value" => val,
+                        other => panic!("unknown map projection `{}`", other),
+                    };
+
+                    return Vector::unit((out, s_next));
+                }
+
                 let sid = match state.infer_expr_type(base.as_ref()) {
                     Some(Type::Path {
                         ref_id: Some(sid), ..
@@ -920,6 +1042,12 @@ impl Expr {
                     _ => panic!("indexing requires array base"),
                 }
             }
+            Expr::MapIndex { base: _, keys } => {
+                panic!(
+                    "map index must be projected via `.clk_prev` or `.value`, found {:?}",
+                    keys
+                );
+            }
             Expr::Binary {
                 op: BinOp::Add,
                 lhs,
@@ -932,9 +1060,9 @@ impl Expr {
                     rhs: rhs.clone(),
                 };
                 if state.is_field_expr(&bin) {
-                    eval_bin("Add", *lhs, *rhs, state, |a, b| (a + b).mod_field())
+                    eval_bin("Add", *lhs, *rhs, state, |a, b, s| mod_if_needed(a + b, s))
                 } else {
-                    eval_bin("Add", *lhs, *rhs, state, |a, b| a + b)
+                    eval_bin("Add", *lhs, *rhs, state, |a, b, _| a + b)
                 }
             }
 
@@ -950,9 +1078,9 @@ impl Expr {
                     rhs: rhs.clone(),
                 };
                 if state.is_field_expr(&bin) {
-                    eval_bin("Sub", *lhs, *rhs, state, |a, b| (a - b).mod_field())
+                    eval_bin("Sub", *lhs, *rhs, state, |a, b, s| mod_if_needed(a - b, s))
                 } else {
-                    eval_bin("Sub", *lhs, *rhs, state, |a, b| a - b)
+                    eval_bin("Sub", *lhs, *rhs, state, |a, b, _| a - b)
                 }
             }
 
@@ -984,12 +1112,12 @@ impl Expr {
                     };
 
                     if use_mod {
-                        eval_bin("Mul", *lhs, *rhs, state, |a, b| (a * b).mod_field())
+                        eval_bin("Mul", *lhs, *rhs, state, |a, b, s| mod_if_needed(a * b, s))
                     } else {
-                        eval_bin("Mul", *lhs, *rhs, state, |a, b| a * b)
+                        eval_bin("Mul", *lhs, *rhs, state, |a, b, _| a * b)
                     }
                 } else {
-                    eval_bin("Mul", *lhs, *rhs, state, |a, b| a * b)
+                    eval_bin("Mul", *lhs, *rhs, state, |a, b, _| a * b)
                 }
             }
 
@@ -997,7 +1125,7 @@ impl Expr {
                 op: BinOp::BitAnd,
                 lhs,
                 rhs,
-            } => eval_bin("BitAnd", *lhs, *rhs, state, |a, b| {
+            } => eval_bin("BitAnd", *lhs, *rhs, state, |a, b, _| {
                 let cond = BoolExpr::and(vec![a.ne(SymExpr::Int(0)), b.ne(SymExpr::Int(0))]);
                 SymExpr::Ite(
                     Box::new(cond),
@@ -1018,49 +1146,49 @@ impl Expr {
                 op: BinOp::Eq,
                 lhs,
                 rhs,
-            } => eval_bin("Eq", *lhs, *rhs, state, |a, b| a.eq_to(b).as_int()),
+            } => eval_bin("Eq", *lhs, *rhs, state, |a, b, _| a.eq_to(b).as_int()),
 
             // Inequality as 0/1.
             Expr::Binary {
                 op: BinOp::Ne,
                 lhs,
                 rhs,
-            } => eval_bin("Ne", *lhs, *rhs, state, |a, b| a.ne(b).as_int()),
+            } => eval_bin("Ne", *lhs, *rhs, state, |a, b, _| a.ne(b).as_int()),
 
             // Less-than as 0/1.
             Expr::Binary {
                 op: BinOp::Lt,
                 lhs,
                 rhs,
-            } => eval_bin("Lt", *lhs, *rhs, state, |a, b| a.lt(b).as_int()),
+            } => eval_bin("Lt", *lhs, *rhs, state, |a, b, _| a.lt(b).as_int()),
 
             // Less-or-equal as 0/1.
             Expr::Binary {
                 op: BinOp::Le,
                 lhs,
                 rhs,
-            } => eval_bin("Le", *lhs, *rhs, state, |a, b| a.le(b).as_int()),
+            } => eval_bin("Le", *lhs, *rhs, state, |a, b, _| a.le(b).as_int()),
 
             // Greater-than as 0/1.
             Expr::Binary {
                 op: BinOp::Gt,
                 lhs,
                 rhs,
-            } => eval_bin("Gt", *lhs, *rhs, state, |a, b| a.gt(b).as_int()),
+            } => eval_bin("Gt", *lhs, *rhs, state, |a, b, _| a.gt(b).as_int()),
 
             // Greater-or-equal as 0/1.
             Expr::Binary {
                 op: BinOp::Ge,
                 lhs,
                 rhs,
-            } => eval_bin("Ge", *lhs, *rhs, state, |a, b| a.ge(b).as_int()),
+            } => eval_bin("Ge", *lhs, *rhs, state, |a, b, _| a.ge(b).as_int()),
 
             // Logical AND (&&) as 0/1 using non-zero test.
             Expr::Binary {
                 op: BinOp::And,
                 lhs,
                 rhs,
-            } => eval_bin("And", *lhs, *rhs, state, |a, b| {
+            } => eval_bin("And", *lhs, *rhs, state, |a, b, _| {
                 let c1 = a.ne(SymExpr::Int(0));
                 let c2 = b.ne(SymExpr::Int(0));
                 BoolExpr::and(vec![c1, c2]).as_int()
@@ -1071,7 +1199,7 @@ impl Expr {
                 op: BinOp::Or,
                 lhs,
                 rhs,
-            } => eval_bin("Or", *lhs, *rhs, state, |a, b| {
+            } => eval_bin("Or", *lhs, *rhs, state, |a, b, _| {
                 let c1 = a.ne(SymExpr::Int(0));
                 let c2 = b.ne(SymExpr::Int(0));
                 BoolExpr::or(vec![c1, c2]).as_int()
@@ -1165,24 +1293,122 @@ fn lvalue_to_expr(lv: &LValue) -> Expr {
             LvTail::Index(idx) => {
                 e = Expr::Index(Box::new(e), Box::new(idx.clone()));
             }
+            LvTail::MapIndex(k1, k2) => {
+                e = Expr::MapIndex {
+                    base: Box::new(e),
+                    keys: vec![k1.clone(), k2.clone()],
+                };
+            }
         }
     }
     e
+}
+
+fn lvalue_eq(a: &LValue, b: &LValue) -> bool {
+    if a.ref_id != b.ref_id {
+        return false;
+    }
+    if a.head != b.head {
+        return false;
+    }
+    if a.tails.len() != b.tails.len() {
+        return false;
+    }
+    for (t1, t2) in a.tails.iter().zip(b.tails.iter()) {
+        match (t1, t2) {
+            (LvTail::Field { name: n1 }, LvTail::Field { name: n2 }) => {
+                if n1 != n2 {
+                    return false;
+                }
+            }
+            (LvTail::Index(e1), LvTail::Index(e2)) => {
+                if format!("{:?}", e1) != format!("{:?}", e2) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Evaluate call arguments sequentially and return values with the final state.
 fn eval_call_args(mut state: SymState, args: Vec<Expr>) -> (Vec<SymExpr>, SymState) {
     let mut vals = Vec::with_capacity(args.len());
     for arg in args {
-        let res = arg.eval(state);
-        if res.len() != 1 {
-            panic!("branching in call argument is not supported");
-        }
-        let (v, s1) = res[0].clone();
+        let (v, s1) = expect_single(arg.eval(state), "call argument");
         vals.push(v);
         state = s1;
     }
     (vals, state)
+}
+
+/// Evaluate a map access projection `map[clk, addr].{clk_prev|value}` while caching the pair.
+fn eval_map_index_projection(
+    mut state: SymState,
+    base: &Expr,
+    clk_expr: Expr,
+    addr_expr: Expr,
+    _field: &str,
+) -> (SymExpr, SymExpr, SymState) {
+    // Resolve the map base for id/type and apply any side effects.
+    let base_id = match base {
+        Expr::Path { ref_id, .. } => *ref_id,
+        _ => None,
+    };
+    let base_repr = format!("{:?}", base);
+    let (_map_val, s_after_base) = expect_single(base.clone().eval(state), "map base");
+    state = s_after_base;
+
+    // Determine the map element types.
+    let (ts_ty, val_ty) = match base {
+        Expr::Path {
+            ref_id: Some(vid), ..
+        } => match state.ctx.query_type(*vid) {
+            Some(Type::Map {
+                timestamp, value, ..
+            }) => ((**timestamp).clone(), (**value).clone()),
+            other => panic!("map access on non-map type: {:?}", other),
+        },
+        _ => panic!("map access requires a named map variable"),
+    };
+
+    // Evaluate keys.
+    let (clk, s1) = expect_single(clk_expr.eval(state), "map key clk");
+    let (addr, mut s2) = expect_single(addr_expr.eval(s1), "map key addr");
+
+    // Reuse cached pair if present.
+    if let Some((prev, val)) = s2.find_map_read(base_id, &base_repr, &clk, &addr) {
+        return (prev, val, s2);
+    }
+
+    // Fresh symbols for the returned pair.
+    let ts_sym = s2
+        .type_map(&ts_ty)
+        .unwrap_or_else(|e| panic!("map timestamp type mapping failed: {e}"));
+    let val_sym_ty = s2
+        .type_map(&val_ty)
+        .unwrap_or_else(|e| panic!("map value type mapping failed: {e}"));
+
+    let clk_prev = s2.fresh_sym("map_clk_prev", ts_sym);
+    let val = s2.fresh_sym("map_val", val_sym_ty);
+
+    // Record memory events and cache.
+    s2 = s2.add_memory_event(
+        MemoryEventKind::Send,
+        clk_prev.clone(),
+        addr.clone(),
+        val.clone(),
+    );
+    s2 = s2.add_memory_event(
+        MemoryEventKind::Receive,
+        clk.clone(),
+        addr.clone(),
+        val.clone(),
+    );
+    s2 = s2.record_map_read(base_id, base_repr, clk, addr, clk_prev.clone(), val.clone());
+
+    (clk_prev, val, s2)
 }
 
 /// Try to evaluate a builtin call (scalar method or free function).
@@ -1212,7 +1438,7 @@ fn try_eval_builtin_call(
     if let Expr::Path { segments, .. } = callee_expr {
         if let Some(last) = segments.last() {
             match last.as_str() {
-                "to_field" | "to_u32" | "to_word" => {
+                "to_field" | "to_u32" | "to_word" | "and" | "extract_bit_u32" | "from_u32" => {
                     let (arg_vals, s_after_args) = eval_call_args(state, args.clone());
                     return Some(eval_builtin_free_fn_call(
                         s_after_args,
@@ -1274,14 +1500,8 @@ fn eval_regular_call(
 
                 // Scalar parameters keep the old `SymExpr`-based semantics.
                 if ty.is_scalar(&callee_state.ctx) {
-                    let vals = arg_expr.eval(callee_state);
-                    if vals.is_empty() {
-                        panic!("scalar argument evaluation produced no result",);
-                    }
-                    if vals.len() != 1 {
-                        panic!("branching in scalar argument is not supported yet");
-                    }
-                    let (v, s1) = vals[0].clone();
+                    let (v, s1) =
+                        expect_single(arg_expr.eval(callee_state), "scalar argument in call");
                     callee_state = s1;
                     callee_state.store = callee_state
                         .store
@@ -1726,6 +1946,56 @@ fn eval_builtin_free_fn_call(
             }
         }
 
+        "and" => {
+            if arg_vals.len() != 2 {
+                panic!("`and` expects exactly two arguments");
+            }
+            let lhs = arg_vals.remove(0);
+            let rhs = arg_vals.remove(0);
+            let res = state.fresh_sym("and", SymType::Uint(8));
+            let state = constrain_byte_and(state, res.clone(), lhs, rhs);
+            Vector::unit((res, state))
+        }
+
+        "extract_bit_u32" => {
+            if arg_vals.len() != 2 || orig_args.len() != 2 {
+                panic!("`extract_bit_u32` expects exactly two arguments");
+            }
+            let _value_expr = orig_args.remove(0);
+            let idx_expr = orig_args.remove(0);
+            let value = arg_vals.remove(0);
+            let idx_val = arg_vals.remove(0);
+
+            let idx_const = match idx_val {
+                SymExpr::Int(k) => k,
+                other => panic!(
+                    "`extract_bit_u32` index must be a concrete integer literal, got {:?}",
+                    other
+                ),
+            };
+            if idx_const < 0 || idx_const >= 32 {
+                panic!(
+                    "`extract_bit_u32` index must be in [0,32), got {} for expr {:?}",
+                    idx_const, idx_expr
+                );
+            }
+
+            let (bits, state) = decompose_u32_bits(state, value, "extract_bit");
+            let bit = bits[idx_const as usize].clone();
+
+            Vector::unit((bit, state))
+        }
+
+        "from_u32" => {
+            if arg_vals.len() != 1 {
+                panic!("`from_u32` expects exactly one argument");
+            }
+            let src = arg_vals.remove(0);
+            let res = state.fresh_sym("from_u32", SymType::F);
+            let state = state.with_pc(res.clone().eq_to(src));
+            Vector::unit((res, state))
+        }
+
         "to_word" => {
             if arg_vals.len() != 1 || orig_args.len() != 1 {
                 panic!("`to_word` expects exactly one argument");
@@ -1812,14 +2082,10 @@ fn eval_builtin_method_call(
     method_name: &str,
     arg_vals: Vec<SymExpr>,
 ) -> Vector<(SymExpr, SymState)> {
-    let vals = base_expr.eval(state);
-    if vals.len() != 1 {
-        panic!(
-            "branching in builtin method receiver `{}` is not supported",
-            method_name
-        );
-    }
-    let (recv, mut s1) = vals[0].clone();
+    let (recv, mut s1) = expect_single(
+        base_expr.eval(state),
+        &format!("builtin method receiver `{}`", method_name),
+    );
 
     if !arg_vals.is_empty() {
         panic!(

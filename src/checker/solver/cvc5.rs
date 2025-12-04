@@ -10,6 +10,8 @@ pub struct Cvc5ffBackend {
     vars: HashMap<String, SymType>,
     asserts: Vec<String>,
     range_fresh: usize,
+    /// Track range hints (in bits) for encoded terms, to reuse on order constraints.
+    range_hints: HashMap<String, usize>,
 }
 
 impl Cvc5ffBackend {
@@ -19,6 +21,7 @@ impl Cvc5ffBackend {
             vars: HashMap::new(),
             asserts: Vec::new(),
             range_fresh: 0,
+            range_hints: HashMap::new(),
         }
     }
 
@@ -36,7 +39,19 @@ impl Cvc5ffBackend {
     /// Register a symbolic variable and enforce basic sort-specific constraints.
     fn ensure_var(&mut self, name: &str, sort: &SymType) -> Result<(), String> {
         if let Some(prev) = self.vars.get(name) {
-            if prev != sort {
+            // Permit numeric sorts to cohabit the field sort; Bool stays strict.
+            let compatible = match (prev, sort) {
+                (SymType::Bool, SymType::Bool) => true,
+                (SymType::F, SymType::F)
+                | (SymType::F, SymType::Uint(_))
+                | (SymType::F, SymType::Int(_)) => true,
+                (SymType::Uint(_), SymType::F) | (SymType::Int(_), SymType::F) => true,
+                (SymType::Uint(_), SymType::Uint(_))
+                | (SymType::Int(_), SymType::Int(_)) => true,
+                _ => false,
+            };
+
+            if !compatible {
                 return Err(format!(
                     "cvc5-ff: inconsistent sort for `{}`: prev={:?}, new={:?}",
                     name, prev, sort
@@ -48,23 +63,23 @@ impl Cvc5ffBackend {
         match sort {
             // Field elements are interpreted directly in the finite field F.
             SymType::F => {
-                self.vars.insert(name.to_owned(), sort.clone());
+                self.vars.insert(name.to_owned(), SymType::F);
                 Ok(())
             }
 
             // Bool variables are encoded as 0/1 elements of F.
             SymType::Bool => {
-                self.vars.insert(name.to_owned(), sort.clone());
+                self.vars.insert(name.to_owned(), SymType::Bool);
                 self.asserts
                     .push(format!("(or (= {0} (as ff0 F)) (= {0} (as ff1 F)))", name));
                 Ok(())
             }
 
-            // Other scalar sorts are not handled in the FF backend yet.
-            other => Err(format!(
-                "cvc5-ff: sort {:?} is not supported in the finite-field backend for `{}`",
-                other, name
-            )),
+            // Treat machine integers as field elements; range predicates will bound them.
+            SymType::Uint(_) | SymType::Int(_) => {
+                self.vars.insert(name.to_owned(), SymType::F);
+                Ok(())
+            }
         }
     }
 
@@ -148,11 +163,12 @@ impl Cvc5ffBackend {
         value: &SymExpr,
         bits: usize,
     ) -> Result<String, String> {
-        if bits == 0 || bits > 16 {
-            return Err("cvc5-ff: byte decomposition only supports 1..16 bits".to_string());
+        if bits == 0 || bits > 24 {
+            return Err("cvc5-ff: byte decomposition only supports 1..24 bits".to_string());
         }
 
         let target = self.encode_term(value)?;
+        self.range_hints.insert(target.clone(), bits);
         let mut remaining = bits;
         let byte_count = (bits + 7) / 8;
         let range_id = self.range_fresh;
@@ -193,6 +209,201 @@ impl Cvc5ffBackend {
         };
 
         Ok(format!("(= {} {})", target, combined))
+    }
+
+    /// Return `Some(bits)` if `k` is of the form 2^bits - 1 with a small bit-width.
+    fn pow2_minus1_bits(k: i128) -> Option<usize> {
+        if k < 0 {
+            return None;
+        }
+        let kp1 = (k + 1) as u128;
+        if kp1.is_power_of_two() {
+            let bits = kp1.trailing_zeros() as usize;
+            if bits > 0 && bits <= 24 {
+                return Some(bits);
+            }
+        }
+        None
+    }
+
+    fn ceil_log2_u128(x: u128) -> usize {
+        if x <= 1 {
+            1
+        } else {
+            (128 - x.leading_zeros()) as usize
+        }
+    }
+
+    /// Try to derive a bit width hint for a previously-encoded term.
+    fn hint_bits_for_term(&self, term: &str) -> Option<usize> {
+        self.range_hints.get(term).copied()
+    }
+
+    /// Best-effort encoding for order comparisons when the bound is a `2^n-1` constant.
+    /// This covers common byte-sized overflow checks such as `x > 255`.
+    fn encode_order_with_pow2_const(
+        &mut self,
+        op: &str,
+        lhs: &SymExpr,
+        rhs: &SymExpr,
+    ) -> Option<Result<String, String>> {
+        fn as_const(e: &SymExpr) -> Option<i128> {
+            if let SymExpr::Int(k) = e {
+                if *k >= 0 {
+                    return Some(*k);
+                }
+            }
+            None
+        }
+
+        // Normalize to (value ? const) where const is on the RHS.
+        let (val, k, norm_op) = match (as_const(lhs), as_const(rhs)) {
+            (_, Some(c)) => (lhs, c, op),
+            (Some(c), _) => {
+                let swapped = match op {
+                    "lt" => "gt",
+                    "le" => "ge",
+                    "gt" => "lt",
+                    "ge" => "le",
+                    _ => return None,
+                };
+                (rhs, c, swapped)
+            }
+            _ => return None,
+        };
+
+        let bits = Self::pow2_minus1_bits(k)?;
+
+        match norm_op {
+            // x > (2^n-1)  ==>  x - 2^n in [0, 2^n-1]
+            "gt" => {
+                let shifted = SymExpr::Sub(Box::new(val.clone()), Box::new(SymExpr::Int(k + 1)));
+                Some(self.encode_range_byte_decomposition(&shifted, bits))
+            }
+
+            // x >= (2^n-1)  ==>  x - (2^n-1) in [0, 2^n-1]
+            "ge" => {
+                let shifted = SymExpr::Sub(Box::new(val.clone()), Box::new(SymExpr::Int(k)));
+                Some(self.encode_range_byte_decomposition(&shifted, bits))
+            }
+
+            // x <= (2^n-1) is equivalent to x in [0, 2^n-1].
+            "le" => Some(self.encode_range_byte_decomposition(val, bits)),
+
+            // Skip strict `<` for now to avoid over-approximating.
+            _ => None,
+        }
+    }
+
+    /// General order encoding: require one side to be a non-negative constant.
+    /// Encodes `val ? k` as a bounded offset `val = k + c` with a small bit-width for `c`.
+    /// Falls back to an error if we cannot find a safe bound within 24 bits.
+    fn encode_order_with_const(
+        &mut self,
+        op: &str,
+        lhs: &SymExpr,
+        rhs: &SymExpr,
+    ) -> Option<Result<String, String>> {
+        fn as_const(e: &SymExpr) -> Option<i128> {
+            if let SymExpr::Int(k) = e {
+                if *k >= 0 {
+                    return Some(*k);
+                }
+            }
+            None
+        }
+
+        // Normalize so that the constant is on the RHS.
+        let (val, k, norm_op, swapped) = match (as_const(lhs), as_const(rhs)) {
+            (_, Some(c)) => (lhs, c, op, false),
+            (Some(c), _) => {
+                let swapped = match op {
+                    "lt" => "gt",
+                    "le" => "ge",
+                    "gt" => "lt",
+                    "ge" => "le",
+                    _ => return None,
+                };
+                (rhs, c, swapped, true)
+            }
+            _ => return None,
+        };
+
+        // Guard against wrap-around: refuse if k is too close to the modulus.
+        if k >= self.field_modulus / 2 {
+            return Some(Err(format!(
+                "cvc5-ff: order comparison constant {} is too large for safe offset encoding",
+                k
+            )));
+        }
+
+        // Encode the value term once for hint lookup.
+        let val_term = match self.encode_term(val) {
+            Ok(t) => t,
+            Err(e) => return Some(Err(e)),
+        };
+
+        let hint_bits = self.hint_bits_for_term(&val_term);
+
+        // Helper: build offset encoding val = k + c, with 1 <= c <= 2^bits-1 (or 0.. when op is le).
+        let encode_offset = |backend: &mut Cvc5ffBackend, start: i128, bits: usize| {
+            // start is k (for ge/gt) or 0 (for le), bits bounds the offset.
+            let c_bits = bits.min(24).max(1);
+            let offset = SymExpr::Sub(Box::new(val.clone()), Box::new(SymExpr::Int(start)));
+            backend.encode_range_byte_decomposition(&offset, c_bits)
+        };
+
+        match norm_op {
+            // x > k  => x - (k+1) in [0, 2^bits-1], ensure bits large enough for hint gap.
+            "gt" | "ge" => {
+                let min_gap = if norm_op == "gt" { 1 } else { 0 };
+                let bits_needed = if let Some(h) = hint_bits {
+                    let max_val = (1_u128 << h).saturating_sub(1);
+                    let gap = max_val.saturating_sub((k as u128) + min_gap as u128);
+                    let safe_gap = gap.min((1_u128 << 24) - 1);
+                    Self::ceil_log2_u128(safe_gap + 1)
+                } else {
+                    24 // fallback: still safe under p/2; may be bigger than necessary.
+                };
+
+                let start = k + min_gap as i128;
+                Some(encode_offset(self, start, bits_needed))
+            }
+
+            // x <= k  => if hint says max<=k, it's trivially true; otherwise encode x in [0,k].
+            "le" => {
+                if let Some(h) = hint_bits {
+                    let max_val = (1_u128 << h) - 1;
+                    if (k as u128) >= max_val {
+                        return Some(Ok("true".to_string()));
+                    }
+                }
+                let bits_needed = Self::ceil_log2_u128((k as u128) + 1);
+                let offset = SymExpr::Sub(Box::new(val.clone()), Box::new(SymExpr::Int(0)));
+                Some(self.encode_range_byte_decomposition(&offset, bits_needed))
+            }
+
+            // x < k  => encode x <= k-1 if k>0.
+            "lt" => {
+                if k == 0 {
+                    return Some(Ok("false".to_string()));
+                }
+                let adj = k - 1;
+                let bits_needed = Self::ceil_log2_u128((adj as u128) + 1);
+                let offset = SymExpr::Sub(Box::new(val.clone()), Box::new(SymExpr::Int(0)));
+                Some(self.encode_range_byte_decomposition(&offset, bits_needed))
+            }
+
+            _ => None,
+        }
+        .map(|res| {
+            res.map_err(|e| {
+                format!(
+                    "cvc5-ff: failed to encode order comparison (swapped={}): {}",
+                    swapped, e
+                )
+            })
+        })
     }
 
     fn encode_bool(&mut self, b: &BoolExpr) -> Result<String, String> {
@@ -246,8 +457,39 @@ impl Cvc5ffBackend {
                 Ok(format!("(not (= {} {}))", a_s, b_s))
             }
 
-            BoolExpr::Le(_, _) | BoolExpr::Lt(_, _) | BoolExpr::Ge(_, _) | BoolExpr::Gt(_, _) => {
-                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF".to_string())
+            BoolExpr::Le(a, b) => {
+                if let Some(res) = self.encode_order_with_const("le", a, b) {
+                    return res;
+                }
+                if let Some(res) = self.encode_order_with_pow2_const("le", a, b) {
+                    return res;
+                }
+                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF"
+                    .to_string())
+            }
+            BoolExpr::Lt(_, _) => {
+                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF"
+                    .to_string())
+            }
+            BoolExpr::Ge(a, b) => {
+                if let Some(res) = self.encode_order_with_const("ge", a, b) {
+                    return res;
+                }
+                if let Some(res) = self.encode_order_with_pow2_const("ge", a, b) {
+                    return res;
+                }
+                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF"
+                    .to_string())
+            }
+            BoolExpr::Gt(a, b) => {
+                if let Some(res) = self.encode_order_with_const("gt", a, b) {
+                    return res;
+                }
+                if let Some(res) = self.encode_order_with_pow2_const("gt", a, b) {
+                    return res;
+                }
+                Err("cvc5-ff: order comparisons (<,<=,>,>=) are not supported in QF_FF"
+                    .to_string())
             }
             BoolExpr::Range {
                 value,
@@ -321,14 +563,17 @@ impl Cvc5ffBackend {
             out.push_str(&format!("(assert {})\n", a));
         }
 
-        out.push_str("(check-sat)\n");
+        out.push_str("(check-sat)\n(exit)\n");
         out
     }
 
     pub fn check(mut self, phi: &BoolExpr, cmd: &str) -> Result<bool, String> {
         self.assert_bool(phi)?;
         let script = self.build_script();
-        println!("cvc5-ff script:\n{}", script);
+
+        if std::env::var("CVC5_DUMP").is_ok() {
+            let _ = std::fs::write("cvc5_debug.smt2", &script);
+        }
 
         let mut child = Command::new(cmd)
             .arg("--lang")

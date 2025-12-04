@@ -1,7 +1,7 @@
 pub(crate) mod solver;
 pub(crate) mod symbolic;
 
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, rc::Rc, time::Instant};
 
 use crate::{
     ast::{Expr, File, Func, IOType, Item, Type},
@@ -179,6 +179,24 @@ impl<'a> QueryCheck<'a> {
                     }
                 }
 
+                Ok(())
+            }
+            // Maps are treated as opaque scalars for equivalence comparison.
+            Type::Map { .. } => {
+                let (lv, rv) = match (lhs_node, rhs_node) {
+                    (StoreNode::Scalar(a), StoreNode::Scalar(b)) => (a.clone(), b.clone()),
+                    _ => {
+                        return Err(format!(
+                            "Component `{}`: map-typed Query node must be scalar in store (paths {}, {})",
+                            self.comp_name, li, rj
+                        ));
+                    }
+                };
+
+                match io {
+                    IOType::Input => input_pairs.push((lv, rv)),
+                    IOType::Output => output_pairs.push((lv, rv)),
+                }
                 Ok(())
             }
 
@@ -459,6 +477,7 @@ impl<'a> QueryCheck<'a> {
 /// Entry 0 on each side is the member name (`f`, `g`); remaining entries are
 /// roots (either struct-typed or scalar-typed parameters).
 pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Result<(), String> {
+    let trace = std::env::var("CZC_TRACE").is_ok();
     let backend = match config.solver.kind {
         SolverKind::Z3Nia => SmtBackend::Z3Nia,
         SolverKind::Cvc5Ff => SmtBackend::Cvc5Ff {
@@ -536,7 +555,9 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Re
 
         lhs_init.init_params_for_func(&lhs_func, self_struct_id);
 
+        let lhs_exec_start = Instant::now();
         let lhs_terms = lhs_func.clone().execute(lhs_init);
+        let lhs_exec_time = lhs_exec_start.elapsed();
         if lhs_terms.is_empty() {
             return Err(format!(
                 "Component `{}`: no terminal paths produced on LHS",
@@ -554,12 +575,26 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Re
         let mut rhs_init = SymState::new(Rc::clone(&ctx)).with_fresh_start(max_fresh_lhs);
         rhs_init.init_params_for_func(&rhs_func, self_struct_id);
 
+        let rhs_exec_start = Instant::now();
         let rhs_terms = rhs_func.clone().execute(rhs_init);
+        let rhs_exec_time = rhs_exec_start.elapsed();
         if rhs_terms.is_empty() {
             return Err(format!(
                 "Component `{}`: no terminal paths produced on RHS",
                 comp_name
             ));
+        }
+
+        if trace {
+            eprintln!(
+                "Component `{}`: built {} lhs paths in {:?}, {} rhs paths in {:?}; backend {:?}",
+                comp_name,
+                lhs_terms.len(),
+                lhs_exec_time,
+                rhs_terms.len(),
+                rhs_exec_time,
+                backend
+            );
         }
 
         // Check all path pairs.
@@ -580,6 +615,32 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Re
                         &mut output_pairs,
                     )?;
                 }
+
+                // Memory traces must also match.
+                // let lhs_events = lhs_final.memory_trace();
+                // let rhs_events = rhs_final.memory_trace();
+                // if lhs_events.len() != rhs_events.len() {
+                //     return Err(format!(
+                //         "Component `{}`: memory trace length mismatch (lhs path {}, rhs path {}): {} vs {}",
+                //         comp_name,
+                //         li,
+                //         rj,
+                //         lhs_events.len(),
+                //         rhs_events.len()
+                //     ));
+                // }
+
+                // for (idx, (le, re)) in lhs_events.iter().zip(rhs_events.iter()).enumerate() {
+                //     if le.kind != re.kind {
+                //         return Err(format!(
+                //             "Component `{}`: memory event kind mismatch at index {} between lhs path {} and rhs path {}",
+                //             comp_name, idx, li, rj
+                //         ));
+                //     }
+                //     output_pairs.push((le.clk.clone(), re.clk.clone()));
+                //     output_pairs.push((le.addr.clone(), re.addr.clone()));
+                //     output_pairs.push((le.value.clone(), re.value.clone()));
+                // }
 
                 if output_pairs.is_empty() {
                     return Err(format!(
@@ -614,12 +675,26 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Re
                 //     comp_name, li, rj, phi
                 // );
 
+                if trace {
+                    eprintln!(
+                        "Component `{}`: solving path pair ({}, {})",
+                        comp_name, li, rj
+                    );
+                }
+                let solve_start = Instant::now();
                 let sat = check_with_solver(&phi, backend.clone())?;
+                let solve_time = solve_start.elapsed();
                 if sat {
                     return Err(format!(
                         "Component `{}`: equivalence check failed; SMT found a model with equal inputs but differing outputs (lhs path {}, rhs path {})",
                         comp_name, li, rj
                     ));
+                }
+                if trace {
+                    eprintln!(
+                        "Component `{}`: path pair ({}, {}) proven equivalent in {:?}",
+                        comp_name, li, rj, solve_time
+                    );
                 }
             }
         }

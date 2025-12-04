@@ -13,7 +13,13 @@ pub struct DSLParser;
 /// Parse an entire source file into an AST.
 pub fn parse_file(src: &str) -> Result<File> {
     // pest returns a single top-level `file` pair; we must descend into its children.
-    let mut pairs = DSLParser::parse(Rule::file, src)?;
+    let mut pairs = match DSLParser::parse(Rule::file, src) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("parse error: {}", e);
+            return Err(e.into());
+        }
+    };
     let root = pairs
         .next()
         .ok_or_else(|| anyhow!("parser produced no root `file` node"))?;
@@ -510,6 +516,18 @@ fn parse_type(p: Pair<Rule>) -> Result<Type> {
             let size = parse_expr(it.next().unwrap())?;
             Type::Array(Box::new(inner), size)
         }
+        Rule::map_ty => {
+            // map_ty := "map" "<" type_ref "," type_ref "," type_ref ">"
+            let mut it = p.into_inner();
+            let ts = parse_type(it.next().unwrap())?;
+            let key = parse_type(it.next().unwrap())?;
+            let val = parse_type(it.next().unwrap())?;
+            Type::Map {
+                timestamp: Box::new(ts),
+                key: Box::new(key),
+                value: Box::new(val),
+            }
+        }
         Rule::path => Type::Path {
             segments: parse_path(p),
             ref_id: None,
@@ -545,6 +563,12 @@ fn parse_lvalue(p: Pair<Rule>) -> Result<LValue> {
                 tails.push(LvTail::Field {
                     name: seg.as_str().to_string(),
                 });
+            }
+            Rule::map_index_tail => {
+                let mut inner = t.into_inner();
+                let k1 = parse_expr(inner.next().unwrap())?;
+                let k2 = parse_expr(inner.next().unwrap())?;
+                tails.push(LvTail::MapIndex(k1, k2));
             }
             Rule::index_tail => {
                 // index_tail := "[" ~ expr ~ "]"
@@ -690,6 +714,15 @@ fn parse_postfix(p: Pair<Rule>) -> Result<Expr> {
                     }
                 }
                 e = Expr::Call(Box::new(e), args);
+            }
+            Rule::map_index_tail => {
+                let mut inner = tail.into_inner();
+                let k1 = parse_expr(inner.next().unwrap())?;
+                let k2 = parse_expr(inner.next().unwrap())?;
+                e = Expr::MapIndex {
+                    base: Box::new(e),
+                    keys: vec![k1, k2],
+                };
             }
             Rule::index_tail => {
                 // index_tail := "[" expr "]"
