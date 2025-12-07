@@ -12,6 +12,8 @@ use crate::checker::symbolic::context::init_context;
 use crate::utils::derive_config;
 use crate::utils::module_resolver::resolve_and_parse_modules;
 
+const DEFAULT_BENCHMARK: &str = "benchmark/SP1/IsZeroWordOperation/is_zero_word.cz";
+
 /// Command-line interface for the CZ parser.
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -55,7 +57,7 @@ fn main() {
     // Require a path to resolve imports on disk.
     let entry_path = args
         .input
-        .unwrap_or_else(|| PathBuf::from("benchmark/IsZeroWordOperation/is_zero_word.cz"));
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_BENCHMARK));
 
     if trace {
         eprintln!("CZC_TRACE: resolving entry {:?}", entry_path);
@@ -127,15 +129,9 @@ mod tests {
     fn component_benchmarks_without_add4() {
         // Backend mapping mirrors the benchmark script but skips add4 (too slow for tests).
         let cases = vec![
-            ("benchmark/Add/add.cz", "z3_nia"),
-            (
-                "benchmark/IsEqualWordOperation/is_equal.cz",
-                "cvc5_ff",
-            ),
-            (
-                "benchmark/IsZeroWordOperation/is_zero_word.cz",
-                "cvc5_ff",
-            ),
+            ("benchmark/SP1/Add/add.cz", "z3_nia"),
+            ("benchmark/SP1/IsEqualWordOperation/is_equal.cz", "cvc5_ff"),
+            (DEFAULT_BENCHMARK, "cvc5_ff"),
         ];
 
         for (path, solver) in cases {

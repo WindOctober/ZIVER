@@ -6,6 +6,7 @@ use crate::{
         context::{Context, PathKind},
         eval_index_const_or_err,
         expr::{BoolExpr, FIELD_MODULUS, SymExpr, SymType},
+        range::{symtype_bit_width, symtype_range},
         state::{ExecStatus, MemoryEventKind, Store, StoreNode, SymState},
     },
     utils::SolverKind,
@@ -26,19 +27,9 @@ enum ReceiverStep {
 }
 
 fn sym_bounds(sty: &SymType) -> Option<(i128, i128, usize)> {
-    match *sty {
-        SymType::Bool => Some((0, 1, 1)),
-        SymType::Uint(w) if w > 0 && w < 127 => {
-            let max = 1_i128.checked_shl(w as u32)?.saturating_sub(1);
-            Some((0, max, w))
-        }
-        SymType::Int(w) if w > 0 && w < 127 => {
-            let hi = 1_i128.checked_shl((w - 1) as u32)?.saturating_sub(1);
-            let lo = -(1_i128.checked_shl((w - 1) as u32)?);
-            Some((lo, hi, w))
-        }
-        _ => None,
-    }
+    let (min, max) = symtype_range(sty)?;
+    let bits = symtype_bit_width(sty)?;
+    Some((min, max, bits))
 }
 
 /// Drop a field modulus reduction when the inferred range already lies inside the field.
@@ -1371,9 +1362,7 @@ fn eval_map_index_projection(
         },
         _ => panic!("map access requires a named map variable"),
     };
-    let (ret_ts_ty, ret_val_ty) = state
-        .ctx
-        .map_return_pair_types(&ts_ty, &val_ty);
+    let (ret_ts_ty, ret_val_ty) = state.ctx.map_return_pair_types(&ts_ty, &val_ty);
 
     // Evaluate keys.
     let (clk, s1) = expect_single(clk_expr.eval(state), "map key clk");

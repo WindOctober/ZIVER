@@ -5,7 +5,8 @@ use z3::{
     ast::{Bool, Int},
 };
 
-use crate::checker::symbolic::expr::{BoolExpr, FIELD_MODULUS, SymExpr, SymType};
+use crate::checker::symbolic::expr::{BoolExpr, SymExpr, SymType};
+use crate::checker::symbolic::range::{symexpr_range, symtype_range};
 
 /// Z3 backend using integer arithmetic with range constraints.
 pub struct Z3NiaBackend {
@@ -77,138 +78,15 @@ impl Z3NiaBackend {
         self.range_hints.get(name).copied()
     }
 
-    fn symtype_range(sty: &SymType) -> Option<(i128, i128)> {
-        match *sty {
-            SymType::Bool => Some((0, 1)),
-            SymType::Uint(w) if w > 0 && w < 127 => {
-                let max = 1_i128.checked_shl(w as u32)?.saturating_sub(1);
-                Some((0, max))
-            }
-            SymType::Int(w) if w > 0 && w < 127 => {
-                let hi = 1_i128.checked_shl((w - 1) as u32)?.saturating_sub(1);
-                let lo = -(1_i128.checked_shl((w - 1) as u32)?);
-                Some((lo, hi))
-            }
-            SymType::F => Some((0, FIELD_MODULUS - 1)),
-            _ => None,
-        }
-    }
-
-    fn range_add(a: (i128, i128), b: (i128, i128)) -> Option<(i128, i128)> {
-        Some((a.0.checked_add(b.0)?, a.1.checked_add(b.1)?))
-    }
-
-    fn range_sub(a: (i128, i128), b: (i128, i128)) -> Option<(i128, i128)> {
-        Some((a.0.checked_sub(b.1)?, a.1.checked_sub(b.0)?))
-    }
-
-    fn range_mul(a: (i128, i128), b: (i128, i128)) -> Option<(i128, i128)> {
-        let cands = [
-            a.0.checked_mul(b.0)?,
-            a.0.checked_mul(b.1)?,
-            a.1.checked_mul(b.0)?,
-            a.1.checked_mul(b.1)?,
-        ];
-        Some((*cands.iter().min()?, *cands.iter().max()?))
-    }
-
     /// Conservative interval for an expression using recorded hints + symbolic sorts.
     fn expr_range(&self, e: &SymExpr) -> Option<(i128, i128)> {
-        match e {
-            SymExpr::Int(k) => Some((*k, *k)),
-            SymExpr::Var(name, sty) => {
-                if let Some(h) = self.hint_for(name) {
-                    return Some(h);
-                }
-                Z3NiaBackend::symtype_range(sty)
-            }
-            SymExpr::Neg(inner) => {
-                let (lo, hi) = self.expr_range(inner)?;
-                Some((-hi, -lo))
-            }
-            SymExpr::Add(xs) => {
-                let mut acc = Some((0_i128, 0_i128));
-                for x in xs {
-                    let xr = self.expr_range(x)?;
-                    acc = acc.and_then(|a| Self::range_add(a, xr));
-                }
-                acc
-            }
-            SymExpr::Mul(xs) => {
-                let mut it = xs.iter();
-                let first = self.expr_range(it.next()?)?;
-                let mut acc = first;
-                for x in it {
-                    let xr = self.expr_range(x)?;
-                    acc = match Self::range_mul(acc, xr) {
-                        Some(r) => r,
-                        None => return None,
-                    };
-                }
-                Some(acc)
-            }
-            SymExpr::Sub(a, b) => {
-                let ra = self.expr_range(a)?;
-                let rb = self.expr_range(b)?;
-                Self::range_sub(ra, rb)
-            }
-            SymExpr::Div(a, b) => {
-                let ra = self.expr_range(a)?;
-                let rb = self.expr_range(b)?;
-                if rb.0 <= 0 && rb.1 >= 0 {
-                    return None;
-                }
-                let cands = [
-                    ra.0.checked_div(rb.0)?,
-                    ra.0.checked_div(rb.1)?,
-                    ra.1.checked_div(rb.0)?,
-                    ra.1.checked_div(rb.1)?,
-                ];
-                Some((*cands.iter().min()?, *cands.iter().max()?))
-            }
-            SymExpr::Ite(_, t, e) => {
-                let rt = self.expr_range(t)?;
-                let re = self.expr_range(e)?;
-                Some((std::cmp::min(rt.0, re.0), std::cmp::max(rt.1, re.1)))
-            }
-            SymExpr::Mod(_, m) => {
-                if let SymExpr::Int(k) = **m {
-                    if k > 0 {
-                        return Some((0, k - 1));
-                    }
-                }
-                None
-            }
-        }
+        symexpr_range(e, |name, _| self.hint_for(name))
     }
 
     fn assert_sort_range(&mut self, name: Option<&str>, v: &Int, sort: &SymType) {
-        fn i64_const(k: i128) -> i64 {
-            i64::try_from(k).expect("Z3 range bound out of i64 range")
-        }
-
         // Build the default type range.
-        let type_range: Option<(i128, Option<i128>)> = match sort {
-            SymType::Bool => Some((0, Some(1))),
-            SymType::Uint(w) => {
-                if *w >= 63 {
-                    Some((0, None))
-                } else {
-                    let max = (1_i128 << *w as u32) - 1;
-                    Some((0, Some(max)))
-                }
-            }
-            SymType::Int(w) => {
-                if *w == 0 || *w >= 62 {
-                    None
-                } else {
-                    let min = -(1_i128 << (*w as u32 - 1));
-                    let max = (1_i128 << (*w as u32 - 1)) - 1;
-                    Some((min, Some(max)))
-                }
-            }
-            SymType::F => Some((0, Some(FIELD_MODULUS - 1))),
-        };
+        let type_range: Option<(i128, Option<i128>)> =
+            symtype_range(sort).map(|(lo, hi)| (lo, Some(hi)));
 
         // Merge with any hint provided for this name.
         let merged: Option<(i128, Option<i128>)> = if let (Some((h_lo, h_hi)), Some((t_lo, t_hi))) =
@@ -229,9 +107,13 @@ impl Z3NiaBackend {
 
         let Some((lo, hi_opt)) = merged else { return };
 
-        self.solver.assert(&v.ge(&Int::from_i64(i64_const(lo))));
+        if let Ok(lo_i64) = i64::try_from(lo) {
+            self.solver.assert(&v.ge(&Int::from_i64(lo_i64)));
+        }
         if let Some(hi) = hi_opt {
-            self.solver.assert(&v.le(&Int::from_i64(i64_const(hi))));
+            if let Ok(hi_i64) = i64::try_from(hi) {
+                self.solver.assert(&v.le(&Int::from_i64(hi_i64)));
+            }
         }
     }
 

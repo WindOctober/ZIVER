@@ -205,7 +205,11 @@ impl<'a> QueryCheck<'a> {
                     if *llen != elems.len() {
                         return Err(format!(
                             "Component `{}`: tuple length mismatch (lhs node has {}, type expects {}, paths {}, {})",
-                            self.comp_name, llen, elems.len(), li, rj
+                            self.comp_name,
+                            llen,
+                            elems.len(),
+                            li,
+                            rj
                         ));
                     }
                 }
@@ -213,7 +217,11 @@ impl<'a> QueryCheck<'a> {
                     if *rlen != elems.len() {
                         return Err(format!(
                             "Component `{}`: tuple length mismatch (rhs node has {}, type expects {}, paths {}, {})",
-                            self.comp_name, rlen, elems.len(), li, rj
+                            self.comp_name,
+                            rlen,
+                            elems.len(),
+                            li,
+                            rj
                         ));
                     }
                 }

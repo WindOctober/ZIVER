@@ -1,0 +1,33 @@
+// crates\core\machine\src\operations\or.rs
+// 现状：缺少按位或运算；lookup操作。暂时运行不了。
+
+const usize WORD_SIZE = 4;
+
+Struct OrOperation {
+    output value: [field; WORD_SIZE], 
+}
+
+Component OrOperation {
+    Computation populate(self, record, a: [field; WORD_SIZE], b: [field; WORD_SIZE]) -> u32 {
+        
+        // 问题1：不支持按位或运算： a[i] | b[i]
+            // 方案1：所以需要在这里需要添加一个 or_byte(a,b),其他地方不用添加
+            // 方案2：用德摩根率来转化A | B = ~(~A ^ ~ B)
+        for i in 0..WORD_SIZE {
+            self.value[i] = or_byte(a[i], b[i]);
+            // 问题2：还需要实现一个lookup
+            record.lookup_or(x_bytes[i], y_bytes[i]);
+        }
+        return 0;
+    }
+
+
+    Constraint eval(cols: OrOperation, a: [field; WORD_SIZE], b: [field; WORD_SIZE]) {
+
+        for i in 0..WORD_SIZE {
+            cols.value[i] = or_byte(a[i], b[i]);
+        }
+    }
+
+    Query(populate, self, a, b; eval, cols, a, b)
+}

@@ -333,9 +333,7 @@ impl Context {
     /// Otherwise default to `(timestamp, value)`.
     pub fn map_return_pair_types(&self, ts_ty: &Type, val_ty: &Type) -> (Type, Type) {
         match val_ty {
-            Type::Tuple(elems) if elems.len() >= 2 => {
-                (elems[0].clone(), elems[1].clone())
-            }
+            Type::Tuple(elems) if elems.len() >= 2 => (elems[0].clone(), elems[1].clone()),
             _ => (ts_ty.clone(), val_ty.clone()),
         }
     }
@@ -406,8 +404,9 @@ impl Context {
                     }
                 }
                 if let Expr::MapIndex { base: map_base, .. } = base.as_ref() {
-                    if let Some(Type::Map { timestamp, value, .. }) =
-                        self.infer_expr_type_static(map_base)
+                    if let Some(Type::Map {
+                        timestamp, value, ..
+                    }) = self.infer_expr_type_static(map_base)
                     {
                         let (ts_ty, val_ty) =
                             self.map_return_pair_types(timestamp.as_ref(), value.as_ref());
@@ -437,8 +436,9 @@ impl Context {
             }
 
             Expr::MapIndex { base, .. } => {
-                if let Some(Type::Map { timestamp, value, .. }) =
-                    self.infer_expr_type_static(base)
+                if let Some(Type::Map {
+                    timestamp, value, ..
+                }) = self.infer_expr_type_static(base)
                 {
                     let (ts_ty, val_ty) =
                         self.map_return_pair_types(timestamp.as_ref(), value.as_ref());

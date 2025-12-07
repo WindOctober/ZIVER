@@ -7,6 +7,7 @@ pub mod context;
 pub mod execute;
 pub mod expr;
 pub(crate) mod helpers;
+pub(crate) mod range;
 pub(crate) mod state;
 /// Evaluate an expression as a concrete array index `usize` if possible.
 /// Accepted forms are:

@@ -9,13 +9,13 @@ BIN="$ROOT/target/debug/certzero"
 RESULTS="$ROOT/benchmark_results.txt"
 
 CASES=(
-  "benchmark/Add/add.cz z3_nia"
-  "benchmark/Add4/add4.cz z3_nia"
-  "benchmark/And/and.cz z3_nia"
-  "benchmark/IsEqualWordOperation/is_equal.cz cvc5_ff"
-  "benchmark/IsZeroOperation/is_zero.cz cvc5_ff"
-  "benchmark/IsZeroWordOperation/is_zero_word.cz cvc5_ff"
-  "benchmark/MapRead/map_read.cz z3_nia"
+  "SP1/Add/add.cz z3_nia"
+  "SP1/Add4/add4.cz z3_nia"
+  "SP1/And/and.cz z3_nia"
+  "SP1/IsEqualWordOperation/is_equal.cz cvc5_ff"
+  "SP1/IsZeroOperation/is_zero.cz cvc5_ff"
+  "SP1/IsZeroWordOperation/is_zero_word.cz cvc5_ff"
+  "SP1/MapRead/map_read.cz z3_nia"
 )
 
 echo "[bench] building..."
@@ -25,13 +25,14 @@ echo "path,solver,status,time_ms" >"$RESULTS"
 
 for entry in "${CASES[@]}"; do
   read -r rel solver <<<"$entry"
-  if [[ ! -f "$ROOT/$rel" ]]; then
-    echo "[bench] skip missing $rel"
+  rel_path="benchmark/$rel"
+  if [[ ! -f "$ROOT/$rel_path" ]]; then
+    echo "[bench] skip missing $rel_path"
     continue
   fi
 
   start_ns=$(date +%s%N)
-  if output=$("$BIN" --solver "$solver" "$rel" 2>&1); then
+  if output=$("$BIN" --solver "$solver" "$rel_path" 2>&1); then
     status="ok"
   else
     status="fail"
@@ -39,9 +40,9 @@ for entry in "${CASES[@]}"; do
   end_ns=$(date +%s%N)
   elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
 
-  echo "$rel,$solver,$status,${elapsed_ms}" >>"$RESULTS"
+  echo "$rel_path,$solver,$status,${elapsed_ms}" >>"$RESULTS"
 
-  echo "[bench] $rel ($solver) -> $status in ${elapsed_ms}ms"
+  echo "[bench] $rel_path ($solver) -> $status in ${elapsed_ms}ms"
   if [[ "$status" != "ok" ]]; then
     echo "$output" | sed 's/^/[bench]   /'
   fi

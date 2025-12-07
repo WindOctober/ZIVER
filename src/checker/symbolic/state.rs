@@ -5,8 +5,8 @@ use std::rc::Rc;
 use crate::ast::*;
 use crate::checker::symbolic::context::{Context, PathKind};
 use crate::checker::symbolic::eval_index_const_or_err;
-use crate::checker::symbolic::expr::FIELD_MODULUS;
 use crate::checker::symbolic::expr::{BoolExpr, SymExpr, SymType};
+use crate::checker::symbolic::range;
 
 /// Persistent store node for symbolic memory.
 #[derive(Clone, Debug)]
@@ -290,118 +290,10 @@ impl SymState {
         self.range_hints.get(name).copied()
     }
 
-    fn symtype_range(sty: &SymType) -> Option<(i128, i128)> {
-        match *sty {
-            SymType::Bool => Some((0, 1)),
-            SymType::Uint(w) if w > 0 && w < 127 => {
-                let max = 1_i128.checked_shl(w as u32)?.saturating_sub(1);
-                Some((0, max))
-            }
-            SymType::Int(w) if w > 0 && w < 127 => {
-                let hi = 1_i128.checked_shl((w - 1) as u32)?.saturating_sub(1);
-                let lo = -(1_i128.checked_shl((w - 1) as u32)?);
-                Some((lo, hi))
-            }
-            SymType::F => Some((0, FIELD_MODULUS - 1)),
-            _ => None,
-        }
-    }
-
-    fn range_add(a: (i128, i128), b: (i128, i128)) -> Option<(i128, i128)> {
-        a.0.checked_add(b.0)
-            .and_then(|lo| a.1.checked_add(b.1).map(|hi| (lo, hi)))
-    }
-
-    fn range_sub(a: (i128, i128), b: (i128, i128)) -> Option<(i128, i128)> {
-        a.0.checked_sub(b.1)
-            .and_then(|lo| a.1.checked_sub(b.0).map(|hi| (lo, hi)))
-    }
-
-    fn range_mul(a: (i128, i128), b: (i128, i128)) -> Option<(i128, i128)> {
-        let cands = [
-            a.0.checked_mul(b.0)?,
-            a.0.checked_mul(b.1)?,
-            a.1.checked_mul(b.0)?,
-            a.1.checked_mul(b.1)?,
-        ];
-        let lo = *cands.iter().min()?;
-        let hi = *cands.iter().max()?;
-        Some((lo, hi))
-    }
-
     /// Conservative range inference for a symbolic expression using recorded hints.
     /// Returns (min, max) if a finite interval can be derived.
     pub fn symexpr_range(&self, e: &SymExpr) -> Option<(i128, i128)> {
-        match e {
-            SymExpr::Int(k) => Some((*k, *k)),
-            SymExpr::Var(name, sty) => {
-                if let Some(h) = self.hint_for_var(name) {
-                    return Some(h);
-                }
-                Self::symtype_range(sty)
-            }
-            SymExpr::Neg(inner) => {
-                let (lo, hi) = self.symexpr_range(inner)?;
-                Some((-hi, -lo))
-            }
-            SymExpr::Add(xs) => {
-                let mut acc = Some((0_i128, 0_i128));
-                for x in xs {
-                    let xr = self.symexpr_range(x)?;
-                    acc = acc.and_then(|a| Self::range_add(a, xr));
-                }
-                acc
-            }
-            SymExpr::Mul(xs) => {
-                let mut it = xs.iter();
-                let first = self.symexpr_range(it.next()?)?;
-                let mut acc = first;
-                for x in it {
-                    let xr = self.symexpr_range(x)?;
-                    acc = match Self::range_mul(acc, xr) {
-                        Some(r) => r,
-                        None => return None,
-                    };
-                }
-                Some(acc)
-            }
-            SymExpr::Sub(a, b) => {
-                let ra = self.symexpr_range(a)?;
-                let rb = self.symexpr_range(b)?;
-                Self::range_sub(ra, rb)
-            }
-            SymExpr::Div(a, b) => {
-                // Very conservative: if divisor range straddles 0 or is unknown, give up.
-                let ra = self.symexpr_range(a)?;
-                let rb = self.symexpr_range(b)?;
-                if rb.0 <= 0 && rb.1 >= 0 {
-                    return None;
-                }
-                // Use bounds via endpoints.
-                let cands = [
-                    ra.0.checked_div(rb.0)?,
-                    ra.0.checked_div(rb.1)?,
-                    ra.1.checked_div(rb.0)?,
-                    ra.1.checked_div(rb.1)?,
-                ];
-                let lo = *cands.iter().min()?;
-                let hi = *cands.iter().max()?;
-                Some((lo, hi))
-            }
-            SymExpr::Ite(_, t, e) => {
-                let rt = self.symexpr_range(t)?;
-                let re = self.symexpr_range(e)?;
-                Some((std::cmp::min(rt.0, re.0), std::cmp::max(rt.1, re.1)))
-            }
-            SymExpr::Mod(_, m) => {
-                if let SymExpr::Int(k) = **m {
-                    if k > 0 {
-                        return Some((0, k - 1));
-                    }
-                }
-                None
-            }
-        }
+        range::symexpr_range(e, |name, _| self.hint_for_var(name))
     }
 
     /// Decompose a u32 value into Boolean bits, reusing prior decompositions of the same value.

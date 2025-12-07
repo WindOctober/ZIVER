@@ -530,10 +530,7 @@ fn parse_type(p: Pair<Rule>) -> Result<Type> {
         }
         Rule::tuple_ty => {
             // tuple_ty := "(" ~ type_ref ~ ("," ~ type_ref)+ ~ ")"
-            let elems: Vec<Type> = p
-                .into_inner()
-                .map(parse_type)
-                .collect::<Result<Vec<_>>>()?;
+            let elems: Vec<Type> = p.into_inner().map(parse_type).collect::<Result<Vec<_>>>()?;
             Type::Tuple(elems)
         }
         Rule::path => Type::Path {
