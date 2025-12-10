@@ -1,12 +1,14 @@
 pub(crate) mod solver;
 pub(crate) mod symbolic;
+mod vm;
+pub use vm::check_vm_workspace;
 
 use std::{collections::HashMap, rc::Rc, time::Instant};
 
 use crate::{
     ast::{Expr, File, Func, IOType, Item, Type},
     checker::{
-        solver::{SmtBackend, check_with_solver},
+        solver::{SmtBackend, backend_from_config, check_with_solver},
         symbolic::{
             context::{Context, PathKind},
             execute::SymbolicExecutor,
@@ -14,7 +16,7 @@ use crate::{
             state::{StoreNode, SymState},
         },
     },
-    utils::{SetConfig, SolverKind},
+    utils::SetConfig,
 };
 
 /// Build a map from field id to IOType for the given struct id.
@@ -62,7 +64,12 @@ impl<'a> QueryCheck<'a> {
         lhs_paths: &'a [Vec<String>],
         rhs_paths: &'a [Vec<String>],
     ) -> Result<Self, String> {
-        debug_assert_eq!(lhs_paths.len(), rhs_paths.len());
+        if lhs_paths.len() != rhs_paths.len() {
+            return Err(format!(
+                "Component `{}`: Query LHS and RHS must have the same number of entries",
+                comp_name
+            ));
+        }
         if lhs_paths.len() < 2 {
             return Err(format!(
                 "Component `{}`: Query must at least specify a function and one root on each side",
@@ -85,287 +92,6 @@ impl<'a> QueryCheck<'a> {
             lhs_roots,
             rhs_roots,
         })
-    }
-
-    /// Recursively collect scalar pairs under a node typed by `ty`.
-    /// The IO role is inherited from the parent field or parameter.
-    fn collect_node_pairs_for_type(
-        &self,
-        ty: &Type,
-        io: &IOType,
-        lhs_node: &StoreNode,
-        rhs_node: &StoreNode,
-        li: usize,
-        rj: usize,
-        input_pairs: &mut Vec<(SymExpr, SymExpr)>,
-        output_pairs: &mut Vec<(SymExpr, SymExpr)>,
-    ) -> Result<(), String> {
-        match ty {
-            // Arrays: drill into each element with the same IO role.
-            Type::Array(inner, _len_expr) => {
-                let (llen, lelems, rlen, relems) = match (lhs_node, rhs_node) {
-                    (
-                        StoreNode::Array {
-                            len: llen,
-                            elems: lelems,
-                        },
-                        StoreNode::Array {
-                            len: rlen,
-                            elems: relems,
-                        },
-                    ) => (llen, lelems, rlen, relems),
-                    _ => {
-                        return Err(format!(
-                            "Component `{}`: array-typed Query node must be backed by array store nodes (paths {}, {})",
-                            self.comp_name, li, rj
-                        ));
-                    }
-                };
-
-                // Prefer length checks when both sides have explicit lengths.
-                if let (Some(llen), Some(rlen)) = (llen, rlen) {
-                    if llen != rlen {
-                        return Err(format!(
-                            "Component `{}`: array length mismatch in Query root (lhs {}, rhs {}, paths {}, {})",
-                            self.comp_name, llen, rlen, li, rj
-                        ));
-                    }
-                    for i in 0..*llen {
-                        let lcell = lelems.get(&i).ok_or_else(|| {
-                            format!(
-                                "Component `{}`: lhs array element {} missing in Query root (paths {}, {})",
-                                self.comp_name, i, li, rj
-                            )
-                        })?;
-                        let rcell = relems.get(&i).ok_or_else(|| {
-                            format!(
-                                "Component `{}`: rhs array element {} missing in Query root (paths {}, {})",
-                                self.comp_name, i, li, rj
-                            )
-                        })?;
-                        self.collect_node_pairs_for_type(
-                            inner,
-                            io,
-                            lcell,
-                            rcell,
-                            li,
-                            rj,
-                            input_pairs,
-                            output_pairs,
-                        )?;
-                    }
-                } else {
-                    // Fallback: iterate over common indices when length metadata is missing.
-                    let mut idxs: Vec<usize> = lelems
-                        .keys()
-                        .filter(|i| relems.contains_key(i))
-                        .cloned()
-                        .collect();
-                    idxs.sort_unstable();
-
-                    for i in idxs {
-                        let lcell = lelems.get(&i).unwrap();
-                        let rcell = relems.get(&i).unwrap();
-                        self.collect_node_pairs_for_type(
-                            inner,
-                            io,
-                            lcell,
-                            rcell,
-                            li,
-                            rj,
-                            input_pairs,
-                            output_pairs,
-                        )?;
-                    }
-                }
-
-                Ok(())
-            }
-            Type::Tuple(elems) => {
-                let (llen, lelems, rlen, relems) = match (lhs_node, rhs_node) {
-                    (
-                        StoreNode::Array {
-                            len: llen,
-                            elems: lelems,
-                        },
-                        StoreNode::Array {
-                            len: rlen,
-                            elems: relems,
-                        },
-                    ) => (llen, lelems, rlen, relems),
-                    _ => {
-                        return Err(format!(
-                            "Component `{}`: tuple-typed Query node must be backed by array store nodes (paths {}, {})",
-                            self.comp_name, li, rj
-                        ));
-                    }
-                };
-
-                if let Some(llen) = llen {
-                    if *llen != elems.len() {
-                        return Err(format!(
-                            "Component `{}`: tuple length mismatch (lhs node has {}, type expects {}, paths {}, {})",
-                            self.comp_name,
-                            llen,
-                            elems.len(),
-                            li,
-                            rj
-                        ));
-                    }
-                }
-                if let Some(rlen) = rlen {
-                    if *rlen != elems.len() {
-                        return Err(format!(
-                            "Component `{}`: tuple length mismatch (rhs node has {}, type expects {}, paths {}, {})",
-                            self.comp_name,
-                            rlen,
-                            elems.len(),
-                            li,
-                            rj
-                        ));
-                    }
-                }
-
-                for (i, elem_ty) in elems.iter().enumerate() {
-                    let lcell = lelems.get(&i).ok_or_else(|| {
-                        format!(
-                            "Component `{}`: lhs tuple element {} missing in Query root (paths {}, {})",
-                            self.comp_name, i, li, rj
-                        )
-                    })?;
-                    let rcell = relems.get(&i).ok_or_else(|| {
-                        format!(
-                            "Component `{}`: rhs tuple element {} missing in Query root (paths {}, {})",
-                            self.comp_name, i, li, rj
-                        )
-                    })?;
-
-                    self.collect_node_pairs_for_type(
-                        elem_ty,
-                        io,
-                        lcell,
-                        rcell,
-                        li,
-                        rj,
-                        input_pairs,
-                        output_pairs,
-                    )?;
-                }
-
-                Ok(())
-            }
-            // Maps are treated as opaque scalars for equivalence comparison.
-            Type::Map { .. } => {
-                let (lv, rv) = match (lhs_node, rhs_node) {
-                    (StoreNode::Scalar(a), StoreNode::Scalar(b)) => (a.clone(), b.clone()),
-                    _ => {
-                        return Err(format!(
-                            "Component `{}`: map-typed Query node must be scalar in store (paths {}, {})",
-                            self.comp_name, li, rj
-                        ));
-                    }
-                };
-
-                match io {
-                    IOType::Input => input_pairs.push((lv, rv)),
-                    IOType::Output => output_pairs.push((lv, rv)),
-                }
-                Ok(())
-            }
-
-            // Structs: recurse into all materialized fields, inheriting the same IO role.
-            Type::Path { ref_id, .. } => {
-                // Builtin scalar vs struct is decided by `classify_type`.
-                match self.ctx.classify_type(ty) {
-                    Ok(PathKind::Builtin) => {
-                        // Scalar leaf: nodes must be scalar.
-                        let (lv, rv) = match (lhs_node, rhs_node) {
-                            (StoreNode::Scalar(a), StoreNode::Scalar(b)) => (a.clone(), b.clone()),
-                            _ => {
-                                return Err(format!(
-                                    "Component `{}`: scalar-typed Query node must be scalar in store (paths {}, {})",
-                                    self.comp_name, li, rj
-                                ));
-                            }
-                        };
-
-                        match io {
-                            IOType::Input => input_pairs.push((lv, rv)),
-                            IOType::Output => output_pairs.push((lv, rv)),
-                        }
-
-                        Ok(())
-                    }
-
-                    Ok(PathKind::Struct(sid)) => {
-                        let sid = (*ref_id).unwrap_or(sid);
-
-                        let (lf, rf) = match (lhs_node, rhs_node) {
-                            (
-                                StoreNode::Struct { fields: lf },
-                                StoreNode::Struct { fields: rf },
-                            ) => (lf, rf),
-                            _ => {
-                                return Err(format!(
-                                    "Component `{}`: struct-typed Query node must be backed by struct store nodes (paths {}, {})",
-                                    self.comp_name, li, rj
-                                ));
-                            }
-                        };
-
-                        // Iterate all field ids present on the lhs; expect rhs to match.
-                        let mut keys: Vec<i64> = lf.keys().cloned().collect();
-                        keys.sort_unstable();
-
-                        for fid in keys {
-                            let lchild = lf.get(&fid).ok_or_else(|| {
-                                format!(
-                                    "lhs missing field id {} in struct under Query root (paths {}, {})",
-                                    fid, li, rj
-                                )
-                            })?;
-                            let rchild = rf.get(&fid).ok_or_else(|| {
-                                format!(
-                                    "rhs missing field id {} in struct under Query root (paths {}, {})",
-                                    fid, li, rj
-                                )
-                            })?;
-
-                            let child_ty = self.ctx.query_type(fid).ok_or_else(|| {
-                                format!(
-                                    "Component `{}`: no static type recorded for field id {} in struct {}",
-                                    self.comp_name, fid, sid
-                                )
-                            })?;
-
-                            // IO role is inherited from the parent field or parameter.
-                            self.collect_node_pairs_for_type(
-                                child_ty,
-                                io,
-                                lchild,
-                                rchild,
-                                li,
-                                rj,
-                                input_pairs,
-                                output_pairs,
-                            )?;
-                        }
-
-                        Ok(())
-                    }
-
-                    Err(e) => Err(format!(
-                        "Component `{}`: failed to classify Query node type `{:?}`: {} (paths {}, {})",
-                        self.comp_name, ty, e, li, rj
-                    )),
-                }
-            }
-
-            Type::Function { .. } => Err(format!(
-                "Component `{}`: function-typed value cannot be used as a Query root or field (paths {}, {})",
-                self.comp_name, li, rj
-            )),
-        }
     }
 
     /// Collect scalar input/output pairs contributed by the k-th root pair.
@@ -463,24 +189,13 @@ impl<'a> QueryCheck<'a> {
                     let rnode = rhs_fields
                         .get(&fid)
                         .ok_or_else(|| format!("rhs missing field {} on path {}", fid, rj))?;
+                    let mut pairs = Vec::new();
+                    lnode.collect_scalar_pairs_with(rnode, &mut pairs)?;
 
-                    let fty = self.ctx.query_type(fid).ok_or_else(|| {
-                        format!(
-                            "Component `{}`: missing static type for field {}",
-                            self.comp_name, fid
-                        )
-                    })?;
-
-                    self.collect_node_pairs_for_type(
-                        fty,
-                        io,
-                        lnode,
-                        rnode,
-                        li,
-                        rj,
-                        input_pairs,
-                        output_pairs,
-                    )?;
+                    match io {
+                        IOType::Input => input_pairs.extend(pairs),
+                        IOType::Output => output_pairs.extend(pairs),
+                    }
                 }
 
                 return Ok(());
@@ -529,16 +244,13 @@ impl<'a> QueryCheck<'a> {
             )
         })?;
 
-        self.collect_node_pairs_for_type(
-            &lhs_ty,
-            &io_lhs,
-            lhs_node,
-            rhs_node,
-            li,
-            rj,
-            input_pairs,
-            output_pairs,
-        )
+        let mut pairs = Vec::new();
+        lhs_node.collect_scalar_pairs_with(rhs_node, &mut pairs)?;
+        match io_lhs {
+            IOType::Input => input_pairs.extend(pairs),
+            IOType::Output => output_pairs.extend(pairs),
+        }
+        Ok(())
     }
 }
 
@@ -551,12 +263,7 @@ impl<'a> QueryCheck<'a> {
 /// roots (either struct-typed or scalar-typed parameters).
 pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Result<(), String> {
     let trace = std::env::var("CZC_TRACE").is_ok();
-    let backend = match config.solver.kind {
-        SolverKind::Z3Nia => SmtBackend::Z3Nia,
-        SolverKind::Cvc5Ff => SmtBackend::Cvc5Ff {
-            cmd: config.solver.cvc5_cmd.clone(),
-        },
-    };
+    let backend = backend_from_config(&config);
 
     for (_, comp_name, members, query_opt) in file.components() {
         let query = match query_opt {
@@ -568,19 +275,6 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Re
                 ));
             }
         };
-
-        if query.lhs.len() != query.rhs.len() {
-            return Err(format!(
-                "Component `{}`: Query LHS and RHS must have the same number of entries",
-                comp_name
-            ));
-        }
-        if query.lhs.len() < 2 {
-            return Err(format!(
-                "Component `{}`: Query must at least specify a function and one root on each side",
-                comp_name
-            ));
-        }
 
         // Resolve members for the function names.
         let lhs_head = query.lhs[0]

@@ -1,4 +1,5 @@
 use crate::checker::symbolic::expr::{BoolExpr, FIELD_MODULUS};
+use crate::utils::{SetConfig, SolverKind};
 
 pub mod cvc5;
 pub mod z3;
@@ -11,6 +12,16 @@ pub use z3::Z3NiaBackend;
 pub enum SmtBackend {
     Z3Nia,
     Cvc5Ff { cmd: String },
+}
+
+/// Select an SMT backend from user configuration.
+pub fn backend_from_config(config: &SetConfig) -> SmtBackend {
+    match config.solver.kind {
+        SolverKind::Z3Nia => SmtBackend::Z3Nia,
+        SolverKind::Cvc5Ff => SmtBackend::Cvc5Ff {
+            cmd: config.solver.cvc5_cmd.clone(),
+        },
+    }
 }
 
 /// Dispatch a single formula to the chosen backend.
