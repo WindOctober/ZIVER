@@ -1,18 +1,20 @@
 use im::HashMap as IMap;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::*;
 use crate::checker::symbolic::context::{Context, PathKind};
 use crate::checker::symbolic::eval_index_const_or_err;
-use crate::checker::symbolic::expr::{BoolExpr, SymExpr, SymType};
+use crate::checker::symbolic::expr::{
+    BoolExpr, FIELD_MODULUS, SymExpr, SymType, SymValue, SymWord, WORD_BYTES,
+};
 use crate::checker::symbolic::range;
 
 /// Persistent store node for symbolic memory.
 #[derive(Clone, Debug)]
 pub enum StoreNode {
     /// Scalar expression.
-    Scalar(SymExpr),
+    Scalar(SymValue),
 
     /// Constant-size (or unknown-size) array.
     /// Indices must be concrete `usize`; symbolic indices are disallowed.
@@ -26,7 +28,7 @@ pub enum StoreNode {
 }
 
 impl StoreNode {
-    fn scalar(e: SymExpr) -> Self {
+    fn scalar(e: SymValue) -> Self {
         StoreNode::Scalar(e)
     }
     fn array(len: Option<usize>) -> Self {
@@ -54,7 +56,12 @@ impl StoreNode {
         match (self, other) {
             // Base case: both nodes are scalar expressions.
             (StoreNode::Scalar(a), StoreNode::Scalar(b)) => {
-                out.push((a.clone(), b.clone()));
+                out.push((a.surface.clone(), b.surface.clone()));
+                if let (Some(wa), Some(wb)) = (a.word_bytes(), b.word_bytes()) {
+                    for (ba, bb) in wa.iter().zip(wb.iter()) {
+                        out.push((ba.clone(), bb.clone()));
+                    }
+                }
                 Ok(())
             }
 
@@ -147,7 +154,7 @@ impl Store {
     }
 
     /// Load a scalar symbolic value from the store; reject arrays/structs.
-    pub fn query_scalar(&self, e: &Expr) -> Option<SymExpr> {
+    pub fn query_scalar(&self, e: &Expr) -> Option<SymValue> {
         let node = self.query_scalar_node(e)?;
         match node {
             StoreNode::Scalar(se) => Some(se.clone()),
@@ -182,6 +189,8 @@ pub struct MapReadRecord {
     pub addr: SymExpr,
     pub clk_prev: SymExpr,
     pub value: SymExpr,
+    clk_key: String,
+    addr_key: String,
 }
 
 /// A single memory access record collected from lookups or map reads.
@@ -203,8 +212,61 @@ pub struct SymState {
     pub memory_events: Vec<MemoryEvent>,
     pub map_reads: Vec<MapReadRecord>,
     bit_decomp_cache: HashMap<String, Vec<SymExpr>>,
+    byte_op_cache: HashSet<String>,
     range_hints: HashMap<String, (i128, i128)>,
     fresh: usize,
+    /// True if the accumulated path condition is already contradictory.
+    unsat: bool,
+}
+
+/// Result of a lightweight Boolean simplification used during path pruning.
+struct BoolSimplifyResult {
+    expr: BoolExpr,
+    always_true: bool,
+    always_false: bool,
+}
+
+impl BoolSimplifyResult {
+    fn from_constant(v: bool) -> Self {
+        Self {
+            expr: BoolExpr::Bool(v),
+            always_true: v,
+            always_false: !v,
+        }
+    }
+
+    fn from_expr(expr: BoolExpr) -> Self {
+        Self {
+            expr,
+            always_true: false,
+            always_false: false,
+        }
+    }
+}
+
+fn tighten_range(
+    hints: &mut HashMap<String, (i128, i128)>,
+    name: &str,
+    min: i128,
+    max: i128,
+) -> (bool, bool) {
+    if min > max {
+        return (true, false);
+    }
+    if let Some((lo, hi)) = hints.get_mut(name) {
+        let implied = *lo >= min && *hi <= max;
+        let new_lo = std::cmp::max(*lo, min);
+        let new_hi = std::cmp::min(*hi, max);
+        if new_lo > new_hi {
+            return (true, implied);
+        }
+        *lo = new_lo;
+        *hi = new_hi;
+        (false, implied)
+    } else {
+        hints.insert(name.to_string(), (min, max));
+        (false, false)
+    }
 }
 
 impl SymState {
@@ -217,8 +279,10 @@ impl SymState {
             memory_events: Vec::new(),
             map_reads: Vec::new(),
             bit_decomp_cache: HashMap::new(),
+            byte_op_cache: HashSet::new(),
             range_hints: HashMap::new(),
             fresh: 0,
+            unsat: false,
         }
     }
     /// Returns the next fresh index for symbol allocation.
@@ -236,8 +300,42 @@ impl SymState {
 
     /// Return a new state with an additional path constraint appended.
     pub fn with_pc(mut self, cond: BoolExpr) -> Self {
+        let normalized = self.normalize_bool(cond);
+
+        if normalized.always_false {
+            self.unsat = true;
+            self.path_cond.push(BoolExpr::Bool(false));
+            return self;
+        }
+
+        // Flatten conjunctions early after normalization.
+        if let BoolExpr::And(vs) = normalized.expr {
+            let mut cur = self;
+            for c in vs {
+                cur = cur.with_pc(c);
+                if cur.unsat {
+                    break;
+                }
+            }
+            return cur;
+        }
+
+        // Drop trivial truths to keep path_cond short.
+        if normalized.always_true {
+            return self;
+        }
+
+        if self.unsat {
+            return self;
+        }
+        if self.is_contradiction(&normalized.expr) {
+            self.unsat = true;
+            self.path_cond.push(BoolExpr::Bool(false));
+            return self;
+        }
+
         // Harvest simple range hints attached to individual variables.
-        match &cond {
+        match &normalized.expr {
             BoolExpr::Range {
                 value, min, max, ..
             } => {
@@ -249,8 +347,339 @@ impl SymState {
             }
             _ => {}
         };
-        self.path_cond.push(cond);
+        self.path_cond.push(normalized.expr);
+        self.maybe_compact_path_cond();
         self
+    }
+
+    /// Normalizes a Boolean condition for early contradiction detection.
+    /// Performs light simplification (flattening, constant folding, range/equality propagation)
+    /// without invoking the solver.
+    fn normalize_bool(&self, cond: BoolExpr) -> BoolSimplifyResult {
+        let mut hints = self.range_hints.clone();
+        self.simplify_bool_expr(cond, &mut hints)
+    }
+
+    fn simplify_bool_expr(
+        &self,
+        cond: BoolExpr,
+        hints: &mut HashMap<String, (i128, i128)>,
+    ) -> BoolSimplifyResult {
+        match cond {
+            BoolExpr::Bool(b) => BoolSimplifyResult::from_constant(b),
+            BoolExpr::Not(inner) => {
+                let res = self.simplify_bool_expr(*inner, hints);
+                if res.always_true {
+                    BoolSimplifyResult::from_constant(false)
+                } else if res.always_false {
+                    BoolSimplifyResult::from_constant(true)
+                } else {
+                    BoolSimplifyResult::from_expr(BoolExpr::Not(Box::new(res.expr)))
+                }
+            }
+            BoolExpr::And(vs) => {
+                let mut flat = Vec::new();
+                for v in vs {
+                    let res = self.simplify_bool_expr(v, hints);
+                    if res.always_false {
+                        return BoolSimplifyResult::from_constant(false);
+                    }
+                    if res.always_true {
+                        continue;
+                    }
+                    flat.push(res.expr);
+                }
+                if flat.is_empty() {
+                    BoolSimplifyResult::from_constant(true)
+                } else if flat.len() == 1 {
+                    BoolSimplifyResult::from_expr(flat.into_iter().next().unwrap())
+                } else {
+                    BoolSimplifyResult::from_expr(BoolExpr::And(flat))
+                }
+            }
+            BoolExpr::Or(vs) => {
+                let mut flat = Vec::new();
+                let base_hints = hints.clone();
+                for v in vs {
+                    let mut branch_hints = base_hints.clone();
+                    let res = self.simplify_bool_expr(v, &mut branch_hints);
+                    if res.always_true {
+                        return BoolSimplifyResult::from_constant(true);
+                    }
+                    if res.always_false {
+                        continue;
+                    }
+                    flat.push(res.expr);
+                }
+                if flat.is_empty() {
+                    BoolSimplifyResult::from_constant(false)
+                } else if flat.len() == 1 {
+                    BoolSimplifyResult::from_expr(flat.into_iter().next().unwrap())
+                } else {
+                    BoolSimplifyResult::from_expr(BoolExpr::Or(flat))
+                }
+            }
+            BoolExpr::Range {
+                value,
+                min,
+                max,
+                bits,
+            } => self.simplify_range(value, min, max, bits, hints),
+            BoolExpr::Eq(a, b) => self.simplify_eq(a, b, hints),
+            BoolExpr::Ne(a, b) => self.simplify_ne(a, b, hints),
+            BoolExpr::Le(a, b) => self.simplify_le(a, b, hints),
+            BoolExpr::Lt(a, b) => self.simplify_lt(a, b, hints),
+            BoolExpr::Ge(a, b) => self.simplify_ge(a, b, hints),
+            BoolExpr::Gt(a, b) => self.simplify_gt(a, b, hints),
+        }
+    }
+
+    fn simplify_range(
+        &self,
+        value: SymExpr,
+        min: i128,
+        max: i128,
+        bits: Option<usize>,
+        hints: &mut HashMap<String, (i128, i128)>,
+    ) -> BoolSimplifyResult {
+        if min > max {
+            return BoolSimplifyResult::from_constant(false);
+        }
+
+        if let SymExpr::Int(k) = value {
+            return BoolSimplifyResult::from_constant(k >= min && k <= max);
+        }
+
+        if let SymExpr::Var(name, _) = &value {
+            let (contradiction, implied) = tighten_range(hints, name, min, max);
+            if contradiction {
+                return BoolSimplifyResult::from_constant(false);
+            }
+            if implied {
+                return BoolSimplifyResult::from_constant(true);
+            }
+        }
+
+        BoolSimplifyResult::from_expr(BoolExpr::Range {
+            value,
+            min,
+            max,
+            bits,
+        })
+    }
+
+    fn simplify_eq(
+        &self,
+        a: SymExpr,
+        b: SymExpr,
+        hints: &mut HashMap<String, (i128, i128)>,
+    ) -> BoolSimplifyResult {
+        if a == b {
+            return BoolSimplifyResult::from_constant(true);
+        }
+
+        match (&a, &b) {
+            (SymExpr::Int(x), SymExpr::Int(y)) => return BoolSimplifyResult::from_constant(x == y),
+            (SymExpr::Var(name, _), SymExpr::Int(k)) => {
+                let (contradiction, implied) = tighten_range(hints, name, *k, *k);
+                if contradiction {
+                    return BoolSimplifyResult::from_constant(false);
+                }
+                if implied {
+                    return BoolSimplifyResult::from_constant(true);
+                }
+            }
+            (SymExpr::Int(k), SymExpr::Var(name, _)) => {
+                let (contradiction, implied) = tighten_range(hints, name, *k, *k);
+                if contradiction {
+                    return BoolSimplifyResult::from_constant(false);
+                }
+                if implied {
+                    return BoolSimplifyResult::from_constant(true);
+                }
+            }
+            _ => {}
+        }
+
+        BoolSimplifyResult::from_expr(BoolExpr::Eq(a, b))
+    }
+
+    fn simplify_ne(
+        &self,
+        a: SymExpr,
+        b: SymExpr,
+        hints: &mut HashMap<String, (i128, i128)>,
+    ) -> BoolSimplifyResult {
+        if a == b {
+            return BoolSimplifyResult::from_constant(false);
+        }
+
+        match (&a, &b) {
+            (SymExpr::Int(x), SymExpr::Int(y)) => return BoolSimplifyResult::from_constant(x != y),
+            (SymExpr::Var(name, _), SymExpr::Int(k)) => {
+                if let Some((lo, hi)) = hints.get(name) {
+                    if *lo == *hi {
+                        return BoolSimplifyResult::from_constant(*lo != *k);
+                    }
+                    if *k < *lo || *k > *hi {
+                        return BoolSimplifyResult::from_constant(true);
+                    }
+                }
+            }
+            (SymExpr::Int(k), SymExpr::Var(name, _)) => {
+                if let Some((lo, hi)) = hints.get(name) {
+                    if *lo == *hi {
+                        return BoolSimplifyResult::from_constant(*lo != *k);
+                    }
+                    if *k < *lo || *k > *hi {
+                        return BoolSimplifyResult::from_constant(true);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        BoolSimplifyResult::from_expr(BoolExpr::Ne(a, b))
+    }
+
+    fn simplify_le(
+        &self,
+        a: SymExpr,
+        b: SymExpr,
+        hints: &mut HashMap<String, (i128, i128)>,
+    ) -> BoolSimplifyResult {
+        if let (SymExpr::Int(x), SymExpr::Int(y)) = (&a, &b) {
+            return BoolSimplifyResult::from_constant(x <= y);
+        }
+
+        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (&a, &b) {
+            if let Some((lo, hi)) = hints.get(name) {
+                if *lo > *k {
+                    return BoolSimplifyResult::from_constant(false);
+                }
+                if *hi <= *k {
+                    return BoolSimplifyResult::from_constant(true);
+                }
+            }
+        }
+
+        if let (SymExpr::Int(k), SymExpr::Var(name, _)) = (&a, &b) {
+            if let Some((lo, hi)) = hints.get(name) {
+                if *hi < *k {
+                    return BoolSimplifyResult::from_constant(false);
+                }
+                if *lo >= *k {
+                    return BoolSimplifyResult::from_constant(true);
+                }
+            }
+        }
+
+        BoolSimplifyResult::from_expr(BoolExpr::Le(a, b))
+    }
+
+    fn simplify_lt(
+        &self,
+        a: SymExpr,
+        b: SymExpr,
+        hints: &mut HashMap<String, (i128, i128)>,
+    ) -> BoolSimplifyResult {
+        if let (SymExpr::Int(x), SymExpr::Int(y)) = (&a, &b) {
+            return BoolSimplifyResult::from_constant(x < y);
+        }
+
+        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (&a, &b) {
+            if let Some((lo, hi)) = hints.get(name) {
+                if *lo >= *k {
+                    return BoolSimplifyResult::from_constant(false);
+                }
+                if *hi < *k {
+                    return BoolSimplifyResult::from_constant(true);
+                }
+            }
+        }
+
+        if let (SymExpr::Int(k), SymExpr::Var(name, _)) = (&a, &b) {
+            if let Some((lo, hi)) = hints.get(name) {
+                if *hi <= *k {
+                    return BoolSimplifyResult::from_constant(false);
+                }
+                if *lo > *k {
+                    return BoolSimplifyResult::from_constant(true);
+                }
+            }
+        }
+
+        BoolSimplifyResult::from_expr(BoolExpr::Lt(a, b))
+    }
+
+    fn simplify_ge(
+        &self,
+        a: SymExpr,
+        b: SymExpr,
+        hints: &mut HashMap<String, (i128, i128)>,
+    ) -> BoolSimplifyResult {
+        if let (SymExpr::Int(x), SymExpr::Int(y)) = (&a, &b) {
+            return BoolSimplifyResult::from_constant(x >= y);
+        }
+
+        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (&a, &b) {
+            if let Some((lo, hi)) = hints.get(name) {
+                if *hi < *k {
+                    return BoolSimplifyResult::from_constant(false);
+                }
+                if *lo >= *k {
+                    return BoolSimplifyResult::from_constant(true);
+                }
+            }
+        }
+
+        if let (SymExpr::Int(k), SymExpr::Var(name, _)) = (&a, &b) {
+            if let Some((lo, hi)) = hints.get(name) {
+                if *lo > *k {
+                    return BoolSimplifyResult::from_constant(false);
+                }
+                if *hi <= *k {
+                    return BoolSimplifyResult::from_constant(true);
+                }
+            }
+        }
+
+        BoolSimplifyResult::from_expr(BoolExpr::Ge(a, b))
+    }
+
+    fn simplify_gt(
+        &self,
+        a: SymExpr,
+        b: SymExpr,
+        hints: &mut HashMap<String, (i128, i128)>,
+    ) -> BoolSimplifyResult {
+        if let (SymExpr::Int(x), SymExpr::Int(y)) = (&a, &b) {
+            return BoolSimplifyResult::from_constant(x > y);
+        }
+
+        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (&a, &b) {
+            if let Some((lo, hi)) = hints.get(name) {
+                if *hi <= *k {
+                    return BoolSimplifyResult::from_constant(false);
+                }
+                if *lo > *k {
+                    return BoolSimplifyResult::from_constant(true);
+                }
+            }
+        }
+
+        if let (SymExpr::Int(k), SymExpr::Var(name, _)) = (&a, &b) {
+            if let Some((lo, hi)) = hints.get(name) {
+                if *lo >= *k {
+                    return BoolSimplifyResult::from_constant(false);
+                }
+                if *hi < *k {
+                    return BoolSimplifyResult::from_constant(true);
+                }
+            }
+        }
+
+        BoolSimplifyResult::from_expr(BoolExpr::Gt(a, b))
     }
 
     fn cache_key_for_expr(value: &SymExpr) -> String {
@@ -260,19 +689,122 @@ impl SymState {
         }
     }
 
+    pub(crate) fn cache_key_for_expr_normalized(value: &SymExpr) -> String {
+        let norm = Self::canonicalize_symexpr(value);
+        format!("{norm:?}")
+    }
+
+    fn canonicalize_symexpr(e: &SymExpr) -> SymExpr {
+        match e {
+            SymExpr::Neg(x) => SymExpr::Neg(Box::new(Self::canonicalize_symexpr(x))),
+            SymExpr::Add(vs) => {
+                let mut items: Vec<_> = vs.iter().map(Self::canonicalize_symexpr).collect();
+                items.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+                match items.len() {
+                    0 => SymExpr::Int(0),
+                    1 => items.pop().unwrap(),
+                    _ => SymExpr::Add(items),
+                }
+            }
+            SymExpr::Mul(vs) => {
+                let mut items: Vec<_> = vs.iter().map(Self::canonicalize_symexpr).collect();
+                items.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+                match items.len() {
+                    0 => SymExpr::Int(1),
+                    1 => items.pop().unwrap(),
+                    _ => SymExpr::Mul(items),
+                }
+            }
+            SymExpr::Sub(a, b) => SymExpr::Sub(
+                Box::new(Self::canonicalize_symexpr(a)),
+                Box::new(Self::canonicalize_symexpr(b)),
+            ),
+            SymExpr::Div(a, b) => SymExpr::Div(
+                Box::new(Self::canonicalize_symexpr(a)),
+                Box::new(Self::canonicalize_symexpr(b)),
+            ),
+            SymExpr::Ite(c, t, f) => SymExpr::Ite(
+                Box::new(Self::canonicalize_bool_expr(c)),
+                Box::new(Self::canonicalize_symexpr(t)),
+                Box::new(Self::canonicalize_symexpr(f)),
+            ),
+            SymExpr::Mod(a, b) => SymExpr::Mod(
+                Box::new(Self::canonicalize_symexpr(a)),
+                Box::new(Self::canonicalize_symexpr(b)),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    fn canonicalize_bool_expr(b: &BoolExpr) -> BoolExpr {
+        match b {
+            BoolExpr::Not(inner) => BoolExpr::Not(Box::new(Self::canonicalize_bool_expr(inner))),
+            BoolExpr::And(vs) => {
+                let mut items: Vec<_> = vs.iter().map(Self::canonicalize_bool_expr).collect();
+                items.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+                match items.len() {
+                    0 => BoolExpr::Bool(true),
+                    1 => items.pop().unwrap(),
+                    _ => BoolExpr::And(items),
+                }
+            }
+            BoolExpr::Or(vs) => {
+                let mut items: Vec<_> = vs.iter().map(Self::canonicalize_bool_expr).collect();
+                items.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+                match items.len() {
+                    0 => BoolExpr::Bool(false),
+                    1 => items.pop().unwrap(),
+                    _ => BoolExpr::Or(items),
+                }
+            }
+            BoolExpr::Eq(a, b) => {
+                BoolExpr::Eq(Self::canonicalize_symexpr(a), Self::canonicalize_symexpr(b))
+            }
+            BoolExpr::Ne(a, b) => {
+                BoolExpr::Ne(Self::canonicalize_symexpr(a), Self::canonicalize_symexpr(b))
+            }
+            BoolExpr::Le(a, b) => {
+                BoolExpr::Le(Self::canonicalize_symexpr(a), Self::canonicalize_symexpr(b))
+            }
+            BoolExpr::Lt(a, b) => {
+                BoolExpr::Lt(Self::canonicalize_symexpr(a), Self::canonicalize_symexpr(b))
+            }
+            BoolExpr::Ge(a, b) => {
+                BoolExpr::Ge(Self::canonicalize_symexpr(a), Self::canonicalize_symexpr(b))
+            }
+            BoolExpr::Gt(a, b) => {
+                BoolExpr::Gt(Self::canonicalize_symexpr(a), Self::canonicalize_symexpr(b))
+            }
+            BoolExpr::Range {
+                value,
+                min,
+                max,
+                bits,
+            } => BoolExpr::Range {
+                value: Self::canonicalize_symexpr(value),
+                min: *min,
+                max: *max,
+                bits: *bits,
+            },
+            other => other.clone(),
+        }
+    }
+
     fn record_range_hint(&mut self, value: &SymExpr, min: i128, max: i128) {
         if min > max {
             return;
         }
-        if let SymExpr::Var(name, _) = value {
+        if let Some(name) = Self::project_var_name(value) {
             self.range_hints
-                .entry(name.clone())
+                .entry(name)
                 .and_modify(|(lo, hi)| {
                     let new_lo = std::cmp::max(*lo, min);
                     let new_hi = std::cmp::min(*hi, max);
                     if new_lo <= new_hi {
                         *lo = new_lo;
                         *hi = new_hi;
+                    } else {
+                        self.unsat = true;
                     }
                 })
                 .or_insert((min, max));
@@ -280,8 +812,73 @@ impl SymState {
     }
 
     fn record_eq_hint(&mut self, a: &SymExpr, b: &SymExpr) {
-        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (a, b) {
-            self.record_range_hint(&SymExpr::Var(name.clone(), SymType::Bool), *k, *k);
+        if let (Some(name), SymExpr::Int(k)) = (Self::project_var_name(a), b) {
+            self.record_range_hint(&SymExpr::Var(name, SymType::Bool), *k, *k);
+        }
+    }
+
+    pub(crate) fn byte_op_cache_key(
+        op: &str,
+        out: &SymExpr,
+        lhs: &SymExpr,
+        rhs: &SymExpr,
+    ) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            op,
+            Self::cache_key_for_expr_normalized(out),
+            Self::cache_key_for_expr_normalized(lhs),
+            Self::cache_key_for_expr_normalized(rhs)
+        )
+    }
+
+    pub(crate) fn is_byte_op_cached(&self, key: &str) -> bool {
+        self.byte_op_cache.contains(key)
+    }
+
+    pub(crate) fn mark_byte_op_cached(mut self, key: String) -> Self {
+        self.byte_op_cache.insert(key);
+        self
+    }
+
+    /// Periodically compact the accumulated path condition by dropping tautologies,
+    /// merging duplicates, and short-circuiting on false.
+    fn maybe_compact_path_cond(&mut self) {
+        const PATH_COND_COMPACT_THRESHOLD: usize = 64;
+        if self.path_cond.len() < PATH_COND_COMPACT_THRESHOLD {
+            return;
+        }
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut compacted = Vec::new();
+        for cond in self.path_cond.drain(..) {
+            match cond {
+                BoolExpr::Bool(true) => continue,
+                BoolExpr::Bool(false) => {
+                    self.unsat = true;
+                    compacted.clear();
+                    compacted.push(BoolExpr::Bool(false));
+                    break;
+                }
+                other => {
+                    let key = format!("{:?}", Self::canonicalize_bool_expr(&other));
+                    if seen.insert(key) {
+                        compacted.push(other);
+                    }
+                }
+            }
+        }
+        self.path_cond = compacted;
+    }
+
+    /// Try to extract a canonical variable name from simple projections (bare var,
+    /// single-element Add/Mul, or degenerate ite). This lets range hints attach
+    /// to field/array projections that are materialized as scalars.
+    fn project_var_name(value: &SymExpr) -> Option<String> {
+        match value {
+            SymExpr::Var(name, _) => Some(name.clone()),
+            SymExpr::Add(vs) | SymExpr::Mul(vs) if vs.len() == 1 => Self::project_var_name(&vs[0]),
+            SymExpr::Ite(_, t, f) if t == f => Self::project_var_name(t),
+            _ => None,
         }
     }
 
@@ -294,6 +891,31 @@ impl SymState {
     /// Returns (min, max) if a finite interval can be derived.
     pub fn symexpr_range(&self, e: &SymExpr) -> Option<(i128, i128)> {
         range::symexpr_range(e, |name, _| self.hint_for_var(name))
+    }
+
+    /// Ensure a non-field expression is constrained to the canonical field range [0, p-1]
+    /// before assigning it into a field-typed destination.
+    pub fn ensure_field_range(mut self, value: &SymExpr) -> SymState {
+        let already_field = matches!(Self::symexpr_sort(value), Some(SymType::F));
+        if already_field {
+            return self;
+        }
+
+        let needs_guard = match self.symexpr_range(value) {
+            Some((lo, hi)) => lo < 0 || hi >= FIELD_MODULUS,
+            None => true,
+        };
+
+        if needs_guard {
+            self = self.with_pc(BoolExpr::Range {
+                value: value.clone(),
+                min: 0,
+                max: FIELD_MODULUS - 1,
+                bits: Some(32),
+            });
+        }
+
+        self
     }
 
     /// Decompose a u32 value into Boolean bits, reusing prior decompositions of the same value.
@@ -333,6 +955,93 @@ impl SymState {
         (bits, self)
     }
 
+    /// Materialize a little-endian word decomposition for a u32 value with range constraints.
+    fn attach_word_bytes(self, value: SymExpr, hint: &str) -> (SymWord, SymState) {
+        let mut state = self;
+        let mut bytes = Vec::with_capacity(WORD_BYTES);
+
+        for i in 0..WORD_BYTES {
+            let b = state.fresh_sym(&format!("{}_b{}", hint, i), SymType::Uint(8));
+            let zero = SymExpr::Int(0);
+            let max = SymExpr::Int(255);
+            state = state.with_pc(BoolExpr::Range {
+                value: b.clone(),
+                min: 0,
+                max: 255,
+                bits: Some(8),
+            });
+            state = state.with_pc(b.clone().ge(zero));
+            state = state.with_pc(b.clone().le(max));
+            bytes.push(b);
+        }
+
+        // Link bytes back to the surface u32 value using little-endian encoding.
+        let factor = SymExpr::Int(256);
+        let mut acc = bytes
+            .last()
+            .cloned()
+            .expect("word representation must contain at least one byte");
+        for i in (0..bytes.len() - 1).rev() {
+            acc = bytes[i].clone() + factor.clone() * acc;
+        }
+        state = state.with_pc(acc.eq_to(value.clone()));
+
+        (SymWord::new(bytes), state)
+    }
+
+    /// Build a scalar value with an optional word-level view according to the symbolic sort.
+    pub fn pack_scalar_with_symtype(
+        mut self,
+        value: SymExpr,
+        sty: &SymType,
+        hint: &str,
+    ) -> (SymValue, SymState) {
+        if matches!(sty, SymType::F) {
+            self = self.ensure_field_range(&value);
+        }
+
+        match sty {
+            SymType::Uint(32) => {
+                let (word, state) = self.attach_word_bytes(value.clone(), hint);
+                let SymWord { bytes } = word;
+                (SymValue::with_word(value, bytes), state)
+            }
+            _ => (SymValue::plain(value), self),
+        }
+    }
+
+    /// Build a scalar value with an optional word view from a concrete AST type.
+    pub fn pack_scalar_for_type(
+        self,
+        value: SymExpr,
+        ty: &Type,
+        hint: &str,
+    ) -> (SymValue, SymState) {
+        let sty = self.type_map(ty).unwrap_or_else(|_| SymType::F);
+        self.pack_scalar_with_symtype(value, &sty, hint)
+    }
+
+    /// In-place convenience wrapper to attach a word representation.
+    pub fn pack_scalar_with_symtype_mut(
+        &mut self,
+        value: SymExpr,
+        sty: &SymType,
+        hint: &str,
+    ) -> SymValue {
+        let state_clone = self.clone();
+        let (val, new_state) = state_clone.pack_scalar_with_symtype(value, sty, hint);
+        *self = new_state;
+        val
+    }
+
+    /// In-place convenience wrapper using a concrete AST type.
+    pub fn pack_scalar_for_type_mut(&mut self, value: SymExpr, ty: &Type, hint: &str) -> SymValue {
+        let state_clone = self.clone();
+        let (val, new_state) = state_clone.pack_scalar_for_type(value, ty, hint);
+        *self = new_state;
+        val
+    }
+
     /// Append a memory event to the trace and return the updated state.
     pub fn add_memory_event(
         mut self,
@@ -363,10 +1072,15 @@ impl SymState {
         clk: &SymExpr,
         addr: &SymExpr,
     ) -> Option<(SymExpr, SymExpr)> {
+        let clk_key = Self::cache_key_for_expr_normalized(clk);
+        let addr_key = Self::cache_key_for_expr_normalized(addr);
         self.map_reads
             .iter()
             .find(|r| {
-                r.base_id == base_id && r.base_repr == base_repr && r.clk == *clk && r.addr == *addr
+                r.base_id == base_id
+                    && r.base_repr == base_repr
+                    && r.clk_key == clk_key
+                    && r.addr_key == addr_key
             })
             .map(|r| (r.clk_prev.clone(), r.value.clone()))
     }
@@ -381,6 +1095,8 @@ impl SymState {
         clk_prev: SymExpr,
         value: SymExpr,
     ) -> Self {
+        let clk_key = Self::cache_key_for_expr_normalized(&clk);
+        let addr_key = Self::cache_key_for_expr_normalized(&addr);
         self.map_reads.push(MapReadRecord {
             base_id,
             base_repr,
@@ -388,6 +1104,8 @@ impl SymState {
             addr,
             clk_prev,
             value,
+            clk_key,
+            addr_key,
         });
         self
     }
@@ -405,12 +1123,17 @@ impl SymState {
 
     /// State is active.
     pub fn is_active(&self) -> bool {
-        matches!(self.status, ExecStatus::Step)
+        matches!(self.status, ExecStatus::Step) && !self.unsat
     }
 
     /// State is terminal for the current control region (Break/Return).
     pub fn is_terminal(&self) -> bool {
         !matches!(self.status, ExecStatus::Step)
+    }
+
+    /// State has already been proven inconsistent.
+    pub fn is_inconsistent(&self) -> bool {
+        self.unsat
     }
 
     /// Returns `true` if the given AST expression has field sort.
@@ -422,13 +1145,56 @@ impl SymState {
         }
     }
 
+    /// Lightweight contradiction check using recorded hints and constant folding.
+    fn is_contradiction(&self, cond: &BoolExpr) -> bool {
+        match cond {
+            BoolExpr::Bool(false) => true,
+            BoolExpr::Range {
+                value, min, max, ..
+            } => {
+                if min > max {
+                    return true;
+                }
+                if let SymExpr::Var(name, _) = value {
+                    if let Some((lo, hi)) = self.range_hints.get(name) {
+                        return *max < *lo || *min > *hi;
+                    }
+                }
+                false
+            }
+            BoolExpr::Eq(a, b) => match (a, b) {
+                (SymExpr::Int(x), SymExpr::Int(y)) => x != y,
+                (SymExpr::Var(name, _), SymExpr::Int(k)) => {
+                    if let Some((lo, hi)) = self.range_hints.get(name) {
+                        *k < *lo || *k > *hi
+                    } else {
+                        false
+                    }
+                }
+                (SymExpr::Int(k), SymExpr::Var(name, _)) => {
+                    if let Some((lo, hi)) = self.range_hints.get(name) {
+                        *k < *lo || *k > *hi
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            },
+            BoolExpr::Ne(a, b) => match (a, b) {
+                (SymExpr::Int(x), SymExpr::Int(y)) => x == y,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     /// Tries to infer expression type using dynamic store information first,
     /// then falls back to static context-based inference.
     pub fn infer_expr_type(&self, e: &Expr) -> Option<Type> {
         // Prefer dynamic sort from a materialized scalar node.
         if let Some(node) = self.query_expr_node(e) {
             if let StoreNode::Scalar(se) = node {
-                if let Some(sty) = Self::symexpr_sort(se) {
+                if let Some(sty) = Self::symexpr_sort(&se.surface) {
                     return Some(self.ctx.sym_type_to_builtin_type(&sty));
                 }
             }
@@ -576,6 +1342,71 @@ impl SymState {
         }
     }
 
+    /// Bind parameters to existing store nodes when provided, allocating any missing ones.
+    /// This is useful for reusing symbols across multiple executions (e.g., executor -> chips).
+    pub fn bind_params_for_func(
+        mut self,
+        func: &Func,
+        bindings: &HashMap<String, StoreNode>,
+        self_struct_id: Option<i64>,
+    ) -> Self {
+        for p in &func.params {
+            match p {
+                Param::SelfParam { id } => {
+                    if let Some(vid) = *id {
+                        if let Some(node) = bindings.get("self") {
+                            self.store = self.store.set(vid, node.clone());
+                        } else if !self.store.vars.contains_key(&vid) {
+                            let node = if let Some(sid) = self_struct_id {
+                                self.materialize_struct_node(sid, "self")
+                            } else {
+                                StoreNode::structure()
+                            };
+                            self.store = self.store.set(vid, node);
+                        }
+                    }
+                }
+                Param::Typed { id, name, ty, .. } => {
+                    if let Some(vid) = *id {
+                        if let Some(node) = bindings.get(name) {
+                            self.store = self.store.set(vid, node.clone());
+                        } else if !self.store.vars.contains_key(&vid) {
+                            let node = self.alloc_node_for_type(name, ty);
+                            self.store = self.store.set(vid, node);
+                        }
+                    }
+                }
+            }
+        }
+        self
+    }
+
+    /// Fetch the store node bound to a parameter (by name) after execution.
+    pub fn param_node(&self, func: &Func, name: &str) -> Option<&StoreNode> {
+        for p in &func.params {
+            match p {
+                Param::SelfParam { id } if name == "self" => {
+                    if let Some(vid) = *id {
+                        if let Some(node) = self.store.get(vid) {
+                            return Some(node);
+                        }
+                    }
+                }
+                Param::Typed {
+                    id, name: pname, ..
+                } if pname == name => {
+                    if let Some(vid) = *id {
+                        if let Some(node) = self.store.get(vid) {
+                            return Some(node);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Materialize a struct into a persistent node with recursively-typed fields.
     /// Each field node is allocated according to its declared static type.
     fn materialize_struct_node(&mut self, struct_id: i64, prefix: &str) -> StoreNode {
@@ -621,7 +1452,16 @@ impl SymState {
                         let sty = self
                             .type_map(ty)
                             .unwrap_or_else(|e| panic!("builtin type mapping failed: {e}"));
-                        StoreNode::scalar(self.fresh_sym(hint, sty))
+                        let surface = self.fresh_sym(hint, sty.clone());
+                        let val = self.pack_scalar_with_symtype_mut(surface, &sty, hint);
+                        StoreNode::scalar(val)
+                    }
+                    Ok(PathKind::Enum(enum_id)) => {
+                        // Enums are backed by integers with a configurable width.
+                        let sty = self.ctx.enum_sym_type(enum_id);
+                        let surface = self.fresh_sym(hint, sty.clone());
+                        let val = self.pack_scalar_with_symtype_mut(surface, &sty, hint);
+                        StoreNode::scalar(val)
                     }
                     Ok(PathKind::Struct(struct_id)) => {
                         // Structs are materialized recursively by field static types.
@@ -659,7 +1499,9 @@ impl SymState {
 
             // Map types are treated as opaque scalars; their contents are not modeled symbolically.
             Type::Map { .. } => {
-                StoreNode::scalar(self.fresh_sym(&format!("{hint}_map"), SymType::F))
+                let surface = self.fresh_sym(&format!("{hint}_map"), SymType::F);
+                let val = self.pack_scalar_with_symtype_mut(surface, &SymType::F, hint);
+                StoreNode::scalar(val)
             }
 
             Type::Tuple(elems) => {

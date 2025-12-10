@@ -5,7 +5,7 @@ use crate::{
     checker::symbolic::{
         context::{Context, PathKind},
         eval_index_const_or_err,
-        expr::{BoolExpr, FIELD_MODULUS, SymExpr, SymType},
+        expr::{BoolExpr, FIELD_MODULUS, SymExpr, SymType, SymValue, WORD_BYTES},
         range::{symtype_bit_width, symtype_range},
         state::{ExecStatus, MemoryEventKind, Store, StoreNode, SymState},
     },
@@ -73,9 +73,36 @@ fn decompose_u32_bits(state: SymState, value: SymExpr, prefix: &str) -> (Vec<Sym
     state.decompose_u32_bits_cached(value, prefix)
 }
 
+/// Obtain little-endian bytes for a u32 surface value, reusing an existing word view if present.
+fn resolve_u32_bytes(
+    state: SymState,
+    arg_expr: &Expr,
+    arg_val: SymExpr,
+    hint: &str,
+) -> (Vec<SymExpr>, SymState) {
+    if let Expr::Path { .. } = arg_expr {
+        if let Some(v) = state.store.query_scalar(arg_expr) {
+            if let Some(word) = v.word {
+                return (word.bytes, state);
+            }
+        }
+    }
+
+    let (packed, state) = state.pack_scalar_with_symtype(arg_val, &SymType::Uint(32), hint);
+    let bytes = packed
+        .word
+        .expect("Uint(32) packing must provide word bytes")
+        .bytes;
+    (bytes, state)
+}
+
 /// Constrain `out = lhs AND rhs` over 8-bit values via bit decomposition.
 fn constrain_byte_and(state: SymState, out: SymExpr, lhs: SymExpr, rhs: SymExpr) -> SymState {
-    let mut state = state;
+    let key = SymState::byte_op_cache_key("and", &out, &lhs, &rhs);
+    if state.is_byte_op_cached(&key) {
+        return state;
+    }
+    let mut state = state.mark_byte_op_cached(key);
     for v in [out.clone(), lhs.clone(), rhs.clone()] {
         state = state.with_pc(BoolExpr::Range {
             value: v,
@@ -99,20 +126,86 @@ fn constrain_byte_and(state: SymState, out: SymExpr, lhs: SymExpr, rhs: SymExpr)
     state.with_pc(out.eq_to(out_acc))
 }
 
+/// Constrain `out = lhs OR rhs` over 8-bit values via bit decomposition.
+fn constrain_byte_or(state: SymState, out: SymExpr, lhs: SymExpr, rhs: SymExpr) -> SymState {
+    let key = SymState::byte_op_cache_key("or", &out, &lhs, &rhs);
+    if state.is_byte_op_cached(&key) {
+        return state;
+    }
+    let mut state = state.mark_byte_op_cached(key);
+    for v in [out.clone(), lhs.clone(), rhs.clone()] {
+        state = state.with_pc(BoolExpr::Range {
+            value: v,
+            min: 0,
+            max: 255,
+            bits: Some(8),
+        });
+    }
+
+    let (lhs_bits, lhs_acc, state) = decompose_byte(state, "byte_or_l");
+    let (rhs_bits, rhs_acc, state) = decompose_byte(state, "byte_or_r");
+    let (out_bits, out_acc, mut state) = decompose_byte(state, "byte_or_out");
+
+    for ((lb, rb), ob) in lhs_bits.iter().zip(rhs_bits.iter()).zip(out_bits.iter()) {
+        // or bit = a + b - a*b for boolean bits
+        let prod = SymExpr::Mul(vec![lb.clone(), rb.clone()]);
+        let or_bit = lb.clone() + rb.clone() - prod;
+        state = state.with_pc(ob.clone().eq_to(or_bit));
+    }
+
+    state = state.with_pc(lhs.eq_to(lhs_acc));
+    state = state.with_pc(rhs.eq_to(rhs_acc));
+    state.with_pc(out.eq_to(out_acc))
+}
+
+/// Constrain `out = lhs XOR rhs` over 8-bit values via bit decomposition.
+fn constrain_byte_xor(state: SymState, out: SymExpr, lhs: SymExpr, rhs: SymExpr) -> SymState {
+    let key = SymState::byte_op_cache_key("xor", &out, &lhs, &rhs);
+    if state.is_byte_op_cached(&key) {
+        return state;
+    }
+    let mut state = state.mark_byte_op_cached(key);
+    for v in [out.clone(), lhs.clone(), rhs.clone()] {
+        state = state.with_pc(BoolExpr::Range {
+            value: v,
+            min: 0,
+            max: 255,
+            bits: Some(8),
+        });
+    }
+
+    let (lhs_bits, lhs_acc, state) = decompose_byte(state, "byte_xor_l");
+    let (rhs_bits, rhs_acc, state) = decompose_byte(state, "byte_xor_r");
+    let (out_bits, out_acc, mut state) = decompose_byte(state, "byte_xor_out");
+
+    for ((lb, rb), ob) in lhs_bits.iter().zip(rhs_bits.iter()).zip(out_bits.iter()) {
+        // xor bit = a + b - 2ab for boolean bits
+        let prod = SymExpr::Mul(vec![lb.clone(), rb.clone()]);
+        let xor_bit = lb.clone() + rb.clone() - SymExpr::Int(2) * prod;
+        state = state.with_pc(ob.clone().eq_to(xor_bit));
+    }
+
+    state = state.with_pc(lhs.eq_to(lhs_acc));
+    state = state.with_pc(rhs.eq_to(rhs_acc));
+    state.with_pc(out.eq_to(out_acc))
+}
+
 pub trait SymbolicExecutor {
     /// Execute one step and produce successor states.
     /// For non-return statements/expressions, the first item is None.
     fn execute(self, state: SymState) -> Vector<(Option<SymExpr>, SymState)>;
 }
 
-fn write_to_lvalue(ctx: &Context, store: Store, lv: &LValue, val: SymExpr) -> Store {
+fn write_to_lvalue(ctx: &Context, state: SymState, lv: &LValue, val: SymExpr) -> SymState {
     let head_id = lv
         .ref_id
         .expect("lvalue head must be resolved to a binding id");
-    let root = store
+    let root = state
+        .store
         .get(head_id)
         .cloned()
         .unwrap_or_else(|| panic!("lvalue head id {} not found in store", head_id));
+    let base_hint = lv.head.join("_");
 
     // Carry static type while descending along tails
     let mut cur_ty = ctx
@@ -122,22 +215,37 @@ fn write_to_lvalue(ctx: &Context, store: Store, lv: &LValue, val: SymExpr) -> St
 
     fn write_tail(
         ctx: &Context,
-        store: &Store,
+        state: SymState,
         mut node: StoreNode,
         cur_ty: &mut Type, // static type accumulator
         tails: &[LvTail],
         val: SymExpr,
-    ) -> StoreNode {
+        hint: &str,
+    ) -> (StoreNode, SymState) {
         if tails.is_empty() {
             return match node {
-                StoreNode::Scalar(_) => StoreNode::Scalar(val),
+                StoreNode::Scalar(_) => {
+                    let (packed, state) = state.pack_scalar_for_type(val, cur_ty, hint);
+                    (StoreNode::Scalar(packed), state)
+                }
                 StoreNode::Struct { fields } => match val {
                     SymExpr::Var(_, _) | SymExpr::Ite(_, _, _) => {
-                        let new_fields = fields
-                            .iter()
-                            .map(|(fid, _)| (*fid, StoreNode::Scalar(val.clone())))
-                            .collect();
-                        StoreNode::Struct { fields: new_fields }
+                        let mut acc_state = state;
+                        let mut new_fields = fields.clone();
+                        for (fid, _) in fields.iter() {
+                            let fty = ctx
+                                .query_type(*fid)
+                                .unwrap_or_else(|| panic!("missing static type for field {}", fid))
+                                .clone();
+                            let (packed, s1) = acc_state.pack_scalar_for_type(
+                                val.clone(),
+                                &fty,
+                                &format!("{hint}_{}", fid),
+                            );
+                            acc_state = s1;
+                            new_fields.insert(*fid, StoreNode::Scalar(packed));
+                        }
+                        (StoreNode::Struct { fields: new_fields }, acc_state)
                     }
                     _ => panic!("struct assignment requires symbolic aggregate value"),
                 },
@@ -171,9 +279,17 @@ fn write_to_lvalue(ctx: &Context, store: Store, lv: &LValue, val: SymExpr) -> St
                     .get(&fid)
                     .cloned()
                     .unwrap_or_else(|| panic!("field `{}` (id={}) not materialized", name, fid));
-                let new_child = write_tail(ctx, store, child, cur_ty, &tails[1..], val);
+                let (new_child, state) = write_tail(
+                    ctx,
+                    state,
+                    child,
+                    cur_ty,
+                    &tails[1..],
+                    val,
+                    &format!("{hint}_{}", name),
+                );
                 let new_fields = fields.update(fid, new_child);
-                StoreNode::Struct { fields: new_fields }
+                (StoreNode::Struct { fields: new_fields }, state)
             }
 
             (StoreNode::Array { len, elems }, LvTail::Index(idx_expr)) => {
@@ -184,8 +300,8 @@ fn write_to_lvalue(ctx: &Context, store: Store, lv: &LValue, val: SymExpr) -> St
                 };
                 *cur_ty = inner;
 
-                let idx =
-                    eval_index_const_or_err(ctx, Some(store), idx_expr).unwrap_or_else(|| {
+                let idx = eval_index_const_or_err(ctx, Some(&state.store), idx_expr)
+                    .unwrap_or_else(|| {
                         panic!(
                             "array index must be a concrete integer literal or constant identifier"
                         )
@@ -198,12 +314,17 @@ fn write_to_lvalue(ctx: &Context, store: Store, lv: &LValue, val: SymExpr) -> St
                 if tails.len() != 1 {
                     panic!("nested write under array element is not supported");
                 }
-                let new_cell = StoreNode::Scalar(val);
+                let (packed, state) =
+                    state.pack_scalar_for_type(val, cur_ty, &format!("{hint}_{}", idx));
+                let new_cell = StoreNode::Scalar(packed);
                 let new_elems = elems.update(idx, new_cell);
-                StoreNode::Array {
-                    len: *len,
-                    elems: new_elems,
-                }
+                (
+                    StoreNode::Array {
+                        len: *len,
+                        elems: new_elems,
+                    },
+                    state,
+                )
             }
             (_, LvTail::MapIndex(_, _)) => {
                 panic!("assignment through map indexing is not supported");
@@ -213,8 +334,10 @@ fn write_to_lvalue(ctx: &Context, store: Store, lv: &LValue, val: SymExpr) -> St
         }
     }
 
-    let updated = write_tail(ctx, &store, root, &mut cur_ty, &lv.tails, val);
-    store.set(head_id, updated)
+    let (updated, mut state) =
+        write_tail(ctx, state, root, &mut cur_ty, &lv.tails, val, &base_hint);
+    state.store = state.store.set(head_id, updated);
+    state
 }
 
 impl SymbolicExecutor for Member {
@@ -236,6 +359,9 @@ impl SymbolicExecutor for Func {
 
             for st in live.into_iter() {
                 for (maybe_ret, s_next) in stmt.clone().execute(st) {
+                    if s_next.is_inconsistent() {
+                        continue;
+                    }
                     if s_next.is_terminal() {
                         terminals.push_back((maybe_ret, s_next));
                     } else {
@@ -252,7 +378,9 @@ impl SymbolicExecutor for Func {
         // Any state that reaches the end of the body without an explicit return
         // is treated as a terminal fall-through with no return value.
         for st in live {
-            terminals.push_back((None, st));
+            if !st.is_inconsistent() {
+                terminals.push_back((None, st));
+            }
         }
 
         terminals
@@ -357,9 +485,10 @@ impl SymbolicExecutor for Stmt {
                     panic!("{}: RHS produced no result", op_name);
                 }
 
-                for (rhs, mut s_rhs) in rhs_vals {
+                for (rhs, s_rhs) in rhs_vals {
+                    let ctx = s_rhs.ctx.clone();
                     let newv = combine(cur.clone(), rhs);
-                    s_rhs.store = write_to_lvalue(&s_rhs.ctx, s_rhs.store.clone(), target, newv);
+                    let s_rhs = write_to_lvalue(&ctx, s_rhs, target, newv);
                     out.push_back((None, s_rhs));
                 }
             }
@@ -483,8 +612,9 @@ impl SymbolicExecutor for Stmt {
                         panic!("non-scalar variable declaration not supported");
                     }
 
-                    // Insert the initialized scalar value into the store
-                    s1.store = s1.store.set(vid, StoreNode::Scalar(v));
+                    // Insert the initialized scalar value into the store (with optional word view)
+                    let packed = s1.pack_scalar_for_type_mut(v, &ty, &format!("var_{}", vid));
+                    s1.store = s1.store.set(vid, StoreNode::Scalar(packed));
                     out.push_back((None, s1));
                 }
 
@@ -492,8 +622,9 @@ impl SymbolicExecutor for Stmt {
             }
 
             Stmt::Assign { target, value } => {
-                let (v, mut s1) = expect_single(value.eval(st), "Assign RHS");
-                s1.store = write_to_lvalue(&s1.ctx, s1.store.clone(), &target, v);
+                let (v, s1) = expect_single(value.eval(st), "Assign RHS");
+                let ctx = s1.ctx.clone();
+                let s1 = write_to_lvalue(&ctx, s1, &target, v);
                 Vector::unit((None, s1))
             }
 
@@ -631,9 +762,10 @@ impl SymbolicExecutor for Stmt {
 
                         // Bind loop variable for this iteration.
                         let mut s_iter = s.clone();
-                        s_iter.store = s_iter
-                            .store
-                            .set(vid, StoreNode::Scalar(SymExpr::Int(k as i128)));
+                        s_iter.store = s_iter.store.set(
+                            vid,
+                            StoreNode::Scalar(SymValue::plain(SymExpr::Int(k as i128))),
+                        );
 
                         // Execute the body as a mini "block executor" with branching.
                         let mut inner_live: Vector<SymState> = Vector::unit(s_iter);
@@ -753,6 +885,28 @@ impl SymbolicExecutor for Stmt {
                             let lhs = payload_vals[1].clone();
                             let rhs = payload_vals[2].clone();
                             s_cur = constrain_byte_and(s_cur, out, lhs, rhs);
+                            Vector::unit((None, s_cur))
+                        }
+                        2 => {
+                            if payload_vals.len() < 3 {
+                                panic!("ByteChip opcode 2 (OR) requires three payload values");
+                            }
+                            let mut s_cur = state_after_opcode;
+                            let out = payload_vals[0].clone();
+                            let lhs = payload_vals[1].clone();
+                            let rhs = payload_vals[2].clone();
+                            s_cur = constrain_byte_or(s_cur, out, lhs, rhs);
+                            Vector::unit((None, s_cur))
+                        }
+                        3 => {
+                            if payload_vals.len() < 3 {
+                                panic!("ByteChip opcode 3 (XOR) requires three payload values");
+                            }
+                            let mut s_cur = state_after_opcode;
+                            let out = payload_vals[0].clone();
+                            let lhs = payload_vals[1].clone();
+                            let rhs = payload_vals[2].clone();
+                            s_cur = constrain_byte_xor(s_cur, out, lhs, rhs);
                             Vector::unit((None, s_cur))
                         }
                         other => panic!("unsupported ByteChip opcode {}", other),
@@ -890,14 +1044,33 @@ impl Stmt {
                     let one = SymExpr::Int(1);
 
                     let cond_b0 = bool_var.clone().eq_to(zero.clone());
-                    let cond_b1 = bool_var.eq_to(one);
-                    let cond_r0 = rest.eq_to(zero);
+                    let cond_b1 = bool_var.clone().eq_to(one);
+                    let cond_r0 = rest.clone().eq_to(zero);
 
                     let mut out = Vector::new();
-                    let s1 = state.clone().with_pc(cond_b0);
-                    out.push_back(s1);
-                    let s2 = state.with_pc(cond_b1).with_pc(cond_r0);
-                    out.push_back(s2);
+                    let bool_range = state.symexpr_range(&bool_var);
+                    let rest_range = state.symexpr_range(&rest);
+
+                    let bool_can_be_zero = bool_range.map_or(true, |(lo, _hi)| lo <= 0);
+                    let bool_can_be_one = bool_range.map_or(true, |(lo, hi)| hi >= 1 && lo <= 1);
+                    let rest_always_zero = rest_range.map_or(false, |(lo, hi)| lo == 0 && hi == 0);
+                    let rest_can_be_zero = rest_range.map_or(true, |(lo, hi)| lo <= 0 && hi >= 0);
+
+                    if bool_can_be_zero {
+                        let s1 = state.clone().with_pc(cond_b0);
+                        out.push_back(s1);
+                    }
+                    if bool_can_be_one && rest_can_be_zero {
+                        let mut s2 = state.clone().with_pc(cond_b1);
+                        if !rest_always_zero {
+                            s2 = s2.with_pc(cond_r0);
+                        }
+                        out.push_back(s2);
+                    }
+
+                    if out.is_empty() {
+                        out.push_back(state.with_pc(BoolExpr::Bool(false)));
+                    }
                     return out;
                 }
             }
@@ -956,7 +1129,7 @@ impl Expr {
                     ref_id,
                     segments: segments.clone(),
                 }) {
-                    return Vector::unit((v, state));
+                    return Vector::unit((v.surface.clone(), state));
                 }
                 if let Some(cid) = ref_id {
                     if let Some(k) = state.ctx.const_int(cid) {
@@ -1029,13 +1202,45 @@ impl Expr {
                     _ => panic!("field base is not struct node"),
                 };
                 if let StoreNode::Scalar(se) = child {
-                    Vector::unit((se.clone(), state))
+                    Vector::unit((se.surface.clone(), state))
                 } else {
                     panic!("field `{}` is not scalar", name);
                 }
             }
 
             Expr::Index(base, idx) => {
+                // Special-case indexing into `to_bytes(<u32>)`.
+                if let Expr::Call(callee, args) = base.as_ref() {
+                    if let Expr::Path { segments, .. } = callee.as_ref() {
+                        if matches!(segments.last().map(String::as_str), Some("to_bytes")) {
+                            if args.len() != 1 {
+                                panic!("`to_bytes` expects exactly one argument");
+                            }
+                            let mut args = args.clone();
+                            let idx_val = eval_index_const_or_err(&state.ctx, Some(&state.store), &idx)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "array index must be a concrete integer literal, const identifier, or scalar store integer: `{:?}`",
+                                        idx
+                                    )
+                                });
+                            if idx_val >= WORD_BYTES {
+                                panic!(
+                                    "`to_bytes` index must be in [0, {}), got {}",
+                                    WORD_BYTES, idx_val
+                                );
+                            }
+
+                            let arg_expr = args.remove(0);
+                            let (arg_val, state) =
+                                expect_single(arg_expr.clone().eval(state), "to_bytes argument");
+                            let (bytes, state) =
+                                resolve_u32_bytes(state, &arg_expr, arg_val, "to_bytes_idx");
+                            return Vector::unit((bytes[idx_val].clone(), state));
+                        }
+                    }
+                }
+
                 let idx_val = eval_index_const_or_err(&state.ctx, Some(&state.store), &idx)
                     .unwrap_or_else(|| {
                         panic!(
@@ -1052,7 +1257,7 @@ impl Expr {
                             .get(&idx_val)
                             .unwrap_or_else(|| panic!("array elem {} uninitialized", idx_val));
                         if let StoreNode::Scalar(se) = cell {
-                            Vector::unit((se.clone(), state))
+                            Vector::unit((se.surface.clone(), state))
                         } else {
                             panic!("array elem is not scalar: {:?} (index: {:?})", base, idx);
                         }
@@ -1429,7 +1634,8 @@ fn try_eval_builtin_call(
     if let Expr::Path { segments, .. } = callee_expr {
         if let Some(last) = segments.last() {
             match last.as_str() {
-                "to_field" | "to_u32" | "to_word" | "and" | "extract_bit_u32" | "from_u32" => {
+                "to_field" | "to_u32" | "to_word" | "to_bytes" | "and" | "or" | "xor"
+                | "extract_bit_u32" | "from_u32" => {
                     let (arg_vals, s_after_args) = eval_call_args(state, args.clone());
                     return Some(eval_builtin_free_fn_call(
                         s_after_args,
@@ -1491,13 +1697,14 @@ fn eval_regular_call(
 
                 // Scalar parameters keep the old `SymExpr`-based semantics.
                 if ty.is_scalar(&callee_state.ctx) {
-                    let (v, s1) =
+                    let (v, mut s1) =
                         expect_single(arg_expr.eval(callee_state), "scalar argument in call");
+                    let packed = s1.pack_scalar_for_type_mut(v, ty, &format!("arg_{}", callee_vid));
                     callee_state = s1;
                     callee_state.store = callee_state
                         .store
                         .clone()
-                        .set(callee_vid, StoreNode::Scalar(v));
+                        .set(callee_vid, StoreNode::Scalar(packed));
                 } else {
                     // Aggregate parameters (structs, arrays, etc.) are passed by copying
                     // the corresponding store node for the argument place.
@@ -1648,6 +1855,12 @@ fn resolve_callee_expr(state: &SymState, callee: &Expr) -> (i64, Option<Receiver
                         base_ty
                     )
                 }
+                Ok(PathKind::Enum(_)) => {
+                    panic!(
+                        "method receiver must be a struct, got enum type `{:?}`",
+                        base_ty
+                    )
+                }
                 Err(e) => {
                     panic!(
                         "invalid method receiver type `{:?}` in call: {}",
@@ -1720,6 +1933,12 @@ fn build_receiver_place(state: &SymState, e: &Expr) -> ReceiverPlace {
                     Ok(PathKind::Builtin) => {
                         panic!(
                             "field receiver in method call must be a struct, got builtin `{:?}`",
+                            base_ty
+                        )
+                    }
+                    Ok(PathKind::Enum(_)) => {
+                        panic!(
+                            "field receiver in method call must be a struct, got enum `{:?}`",
                             base_ty
                         )
                     }
@@ -1886,6 +2105,8 @@ fn eval_builtin_free_fn_call(
             }
             let src = arg_vals.remove(0);
 
+            state = state.ensure_field_range(&src);
+
             let res = state.fresh_sym("to_field", SymType::F);
             let eq = res.clone().eq_to(src);
             state = state.with_pc(eq);
@@ -1948,6 +2169,28 @@ fn eval_builtin_free_fn_call(
             Vector::unit((res, state))
         }
 
+        "or" => {
+            if arg_vals.len() != 2 {
+                panic!("`or` expects exactly two arguments");
+            }
+            let lhs = arg_vals.remove(0);
+            let rhs = arg_vals.remove(0);
+            let res = state.fresh_sym("or", SymType::Uint(8));
+            let state = constrain_byte_or(state, res.clone(), lhs, rhs);
+            Vector::unit((res, state))
+        }
+
+        "xor" => {
+            if arg_vals.len() != 2 {
+                panic!("`xor` expects exactly two arguments");
+            }
+            let lhs = arg_vals.remove(0);
+            let rhs = arg_vals.remove(0);
+            let res = state.fresh_sym("xor", SymType::Uint(8));
+            let state = constrain_byte_xor(state, res.clone(), lhs, rhs);
+            Vector::unit((res, state))
+        }
+
         "extract_bit_u32" => {
             if arg_vals.len() != 2 || orig_args.len() != 2 {
                 panic!("`extract_bit_u32` expects exactly two arguments");
@@ -1982,9 +2225,28 @@ fn eval_builtin_free_fn_call(
                 panic!("`from_u32` expects exactly one argument");
             }
             let src = arg_vals.remove(0);
+
+            state = state.ensure_field_range(&src);
             let res = state.fresh_sym("from_u32", SymType::F);
             let state = state.with_pc(res.clone().eq_to(src));
             Vector::unit((res, state))
+        }
+
+        "to_bytes" => {
+            if arg_vals.len() != 1 || orig_args.len() != 1 {
+                panic!("`to_bytes` expects exactly one argument");
+            }
+
+            let src_expr = orig_args.remove(0);
+            let src_val = arg_vals.remove(0);
+
+            let (bytes, _state) = resolve_u32_bytes(state, &src_expr, src_val, "to_bytes");
+
+            // This builtin is intended to be indexed immediately; using it as a scalar is unsupported.
+            panic!(
+                "`to_bytes` returns a 4-byte array; use `to_bytes(x)[i]` with constant index (bytes = {:?})",
+                bytes
+            );
         }
 
         "to_word" => {
@@ -2028,35 +2290,27 @@ fn eval_builtin_free_fn_call(
                 }
             }
 
-            // Model [u8; 4] as four fresh Uint(8) bytes in range [0, 255].
-            let mut word = Vec::with_capacity(4);
-            for i in 0..4 {
-                let b = state.fresh_sym(&format!("to_word_b{}", i), SymType::Uint(8));
-                let zero = SymExpr::Int(0);
-                let max = SymExpr::Int(255);
+            // Reuse an existing word view if present; otherwise attach one and persist it.
+            let vid_opt = match &src_expr {
+                Expr::Path { ref_id, .. } => *ref_id,
+                _ => None,
+            };
 
-                // 0 <= b <= 255
-                let ge_zero = b.clone().ge(zero);
-                let le_max = b.clone().le(max);
-                state = state.with_pc(ge_zero);
-                state = state.with_pc(le_max);
-
-                word.push(b);
+            if let Some(vid) = vid_opt {
+                if let Some(StoreNode::Scalar(val)) = state.store.get(vid) {
+                    if val.word.is_some() {
+                        return Vector::unit((val.surface.clone(), state));
+                    }
+                }
             }
 
-            // Link the 4 bytes back to the original u32 using little-endian encoding:
-            // src == b0 + 256 * (b1 + 256 * (b2 + 256 * b3))
-            let two_fifty_six = SymExpr::Int(256);
-            let acc3 = word[3].clone();
-            let acc2 = word[2].clone() + two_fifty_six.clone() * acc3;
-            let acc1 = word[1].clone() + two_fifty_six.clone() * acc2;
-            let acc0 = word[0].clone() + two_fifty_six * acc1;
-            let eq = acc0.eq_to(src_val.clone());
-            state = state.with_pc(eq);
+            let (packed, mut state) =
+                state.pack_scalar_with_symtype(src_val.clone(), &SymType::Uint(32), "to_word");
+            if let Some(vid) = vid_opt {
+                state.store = state.store.set(vid, StoreNode::Scalar(packed.clone()));
+            }
 
-            // The byte array is represented implicitly by the four byte variables
-            // and the above constraints. We keep the scalar return as the original u32.
-            Vector::unit((src_val, state))
+            Vector::unit((packed.surface, state))
         }
 
         other => {

@@ -9,11 +9,13 @@ bool    = { "true" | "false" }
 
 // === Top-level ===
 file    = { SOI ~ item* ~ EOI }
-item    = { import | const_decl | struct_decl | component }
+item    = { import | const_decl | enum_decl | struct_decl | function | component }
 
 // === Imports and constants ===
 import      = { "import" ~ path ~ ";" }
 const_decl  = { "const" ~ type_ref ~ ident ~ "=" ~ expr ~ ";" }
+enum_decl   = { "Enum" ~ ident ~ "{" ~ enum_variant* ~ "}" }
+enum_variant = { ident ~ ( "=" ~ expr )? ~ ("," | ";" ) }
 
 // === Types ===
 // A type can be an identifier path or an array type.
@@ -34,6 +36,7 @@ field       = { io_prefix? ~ ident ~ ":" ~ type_ref ~ "," }
 // === Component declarations ===
 component   = { "Component" ~ ident ~ "{" ~ member* ~ query_stmt? ~ "}"}
 member      = _{ computation | constraint }
+function    = { ("fn" | "Function") ~ func_sig ~ block }
 
 // === Query clause (case-insensitive) ===
 // Syntax: Query(xxx,aa,bb; yyy,aa,bb)

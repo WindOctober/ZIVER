@@ -1,0 +1,23 @@
+const usize WORD_SIZE = 4;
+
+Struct OrOperation {
+    output value: [field; WORD_SIZE],
+}
+
+Component OrOperation {
+    Computation populate(self, a: [field; WORD_SIZE], b: [field; WORD_SIZE]) {
+        for i in 0..WORD_SIZE {
+            assert_range(a[i], u8);
+            assert_range(b[i], u8);
+            self.value[i] = or(a[i], b[i]);
+        }
+    }
+
+    Constraint eval(cols: OrOperation, a: [field; WORD_SIZE], b: [field; WORD_SIZE]) {
+        for i in 0..WORD_SIZE {
+            lookup(ByteChip, 2, cols.value[i], a[i], b[i]);
+        }
+    }
+
+    Query(populate, self, a, b; eval, cols, a, b)
+}

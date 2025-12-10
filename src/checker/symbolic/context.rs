@@ -41,6 +41,7 @@ pub struct MemoryChipMeta {
 pub enum PathKind {
     Builtin,     // primitive scalar type
     Struct(i64), // struct type by name lookup
+    Enum(i64),   // enum type by name lookup
 }
 
 /// Minimal typing info used by symbolic execution and light inference.
@@ -64,12 +65,17 @@ pub struct Context {
     types: TypeCtx,
     func_owner: HashMap<i64, i64>, // record method ownership (func_id -> struct_id)
     memory_chips: HashMap<String, MemoryChipMeta>, // lookup chip metadata (lowercase)
+    enum_names: HashMap<i64, String>, // enum_id -> enum name
+    enum_index: HashMap<String, i64>, // enum name -> enum_id
+    enum_widths: HashMap<i64, usize>, // enum_id -> backing integer width
     pub config: SetConfig,
 }
 
 impl Context {
     /// Default width for integer literals.
     const DEFAULT_INT_WIDTH: usize = 64;
+    /// Default width for enum-backed scalar values.
+    const DEFAULT_ENUM_WIDTH: usize = 32;
 
     /// Returns the struct id associated with a component or struct name.
     pub fn struct_id_by_name(&self, name: &str) -> Option<i64> {
@@ -84,6 +90,16 @@ impl Context {
     /// Returns the member map of a struct if available.
     pub fn struct_members(&self, struct_id: i64) -> Option<&HashMap<String, MemberIndex>> {
         self.struct_fields.get(&struct_id)
+    }
+
+    /// Return the symbolic scalar type used to represent an enum discriminant.
+    pub fn enum_sym_type(&self, enum_id: i64) -> SymType {
+        let bits = self
+            .enum_widths
+            .get(&enum_id)
+            .copied()
+            .unwrap_or(Self::DEFAULT_ENUM_WIDTH);
+        SymType::Uint(bits)
     }
 
     /// Constructs a canonical `Type::Path` for the given struct id.
@@ -164,6 +180,9 @@ impl Context {
                 if last == "timestamp" {
                     return Some(SymType::Uint(64));
                 }
+                if last == "word" {
+                    return Some(SymType::Uint(32));
+                }
                 if let Some(bits) = last.strip_prefix('u') {
                     let w = bits.parse::<usize>().ok()?;
                     return Some(SymType::Uint(w));
@@ -175,6 +194,7 @@ impl Context {
 
                 None
             }
+            Ok(PathKind::Enum(enum_id)) => Some(self.enum_sym_type(enum_id)),
             Ok(PathKind::Struct(_)) => None,
             Err(_) => None,
         }
@@ -300,6 +320,7 @@ impl Context {
                 "bool"
                     | "field"
                     | "f"
+                    | "word"
                     | "u8"
                     | "u16"
                     | "u24"
@@ -321,6 +342,9 @@ impl Context {
         // Name-first policy: struct names take precedence.
         if let Some(&sid) = self.struct_index.get(last) {
             return Ok(PathKind::Struct(sid));
+        }
+        if let Some(&eid) = self.enum_index.get(last) {
+            return Ok(PathKind::Enum(eid));
         }
         if is_builtin(last) {
             return Ok(PathKind::Builtin);
@@ -570,6 +594,24 @@ fn fresh_id(next: &mut usize) -> i64 {
     id
 }
 
+/// Evaluate an enum variant value into a concrete `u64`.
+/// Supports integer literals and references to other integer constants.
+fn eval_enum_value(expr: &Expr, ctx: &Context) -> Result<u64, String> {
+    match expr {
+        Expr::Int(k) => Ok(*k),
+        Expr::Paren(inner) => eval_enum_value(inner, ctx),
+        Expr::Path {
+            ref_id: Some(cid), ..
+        } => ctx
+            .const_int(*cid)
+            .ok_or_else(|| "enum discriminant must resolve to an integer constant".to_string()),
+        _ => Err(format!(
+            "unsupported enum discriminant expression: {:?}",
+            expr
+        )),
+    }
+}
+
 /// Build flat globals, resolve types/exprs/functions, and collect exec-time indices.
 /// All top-level symbols from all modules are global; `import` is ignored in this prototype.
 pub fn init_context(mods: &mut [Module]) -> Context {
@@ -586,12 +628,33 @@ pub fn init_context(mods: &mut [Module]) -> Context {
                     *id = Some(nid);
                     scope.insert_global(name.clone(), nid);
                 }
+                Item::Enum {
+                    id, name, variants, ..
+                } => {
+                    let nid = fresh_id(&mut ctx.next_sym_id);
+                    *id = Some(nid);
+                    scope.insert_global(name.clone(), nid);
+                    ctx.enum_index.insert(name.clone(), nid);
+                    ctx.enum_names.insert(nid, name.clone());
+
+                    // Seed variant ids so they are globally visible like constants.
+                    for v in variants.iter_mut() {
+                        let vid = fresh_id(&mut ctx.next_sym_id);
+                        v.id = Some(vid);
+                        scope.insert_global(v.name.clone(), vid);
+                    }
+                }
                 Item::Struct { id, name, .. } => {
                     let nid = fresh_id(&mut ctx.next_sym_id);
                     *id = Some(nid);
                     scope.insert_global(name.clone(), nid);
                     ctx.struct_index.insert(name.clone(), nid);
                     ctx.struct_names.insert(nid, name.clone());
+                }
+                Item::Function { id, func } => {
+                    let fid = fresh_id(&mut ctx.next_sym_id);
+                    *id = Some(fid);
+                    scope.insert_global(func.name.clone(), fid);
                 }
             }
         }
@@ -617,6 +680,50 @@ pub fn init_context(mods: &mut [Module]) -> Context {
                                 "non-literal const initializer: only `Expr::Int` is recorded in const_ints for now"
                             );
                         }
+                    }
+                }
+
+                Item::Enum {
+                    id: enum_id,
+                    name,
+                    variants,
+                } => {
+                    let enum_id = enum_id.expect("enum id set");
+                    // Default backing width for enums; can be customized later.
+                    ctx.enum_widths
+                        .entry(enum_id)
+                        .or_insert(Context::DEFAULT_ENUM_WIDTH);
+
+                    let mut next_value: u64 = 0;
+                    for v in variants.iter_mut() {
+                        if v.id.is_none() {
+                            let vid = fresh_id(&mut ctx.next_sym_id);
+                            v.id = Some(vid);
+                            scope.insert_global(v.name.clone(), vid);
+                        }
+
+                        if let Some(val) = &mut v.value {
+                            resolve_expr_ids_flat(val, &scope, &mut ctx);
+                        }
+
+                        let value = match &v.value {
+                            Some(expr) => eval_enum_value(expr, &ctx).unwrap_or_else(|e| {
+                                panic!(
+                                    "enum `{}` variant `{}` has invalid value: {}",
+                                    name, v.name, e
+                                )
+                            }),
+                            None => next_value,
+                        };
+                        next_value = value.saturating_add(1);
+
+                        let vid = v.id.expect("enum variant id set");
+                        let ty = Type::Path {
+                            segments: vec![name.clone()],
+                            ref_id: Some(enum_id),
+                        };
+                        ctx.types.const_types.insert(vid, ty);
+                        ctx.types.const_ints.insert(vid, value);
                     }
                 }
 
@@ -697,6 +804,37 @@ pub fn init_context(mods: &mut [Module]) -> Context {
                         }
                     }
                 }
+
+                Item::Function { func, .. } => {
+                    if func.id.is_none() {
+                        let fid = fresh_id(&mut ctx.next_sym_id);
+                        func.id = Some(fid);
+                    }
+
+                    let param_tys: Vec<Type> = func
+                        .params
+                        .iter()
+                        .filter_map(|p| match p {
+                            Param::Typed { ty, .. } => {
+                                let mut t = ty.clone();
+                                resolve_type_ids_flat(&mut t, &scope, &mut ctx);
+                                Some(t)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+
+                    let ret_ty = func.ret.as_ref().map(|t| {
+                        let mut r = t.clone();
+                        resolve_type_ids_flat(&mut r, &scope, &mut ctx);
+                        r
+                    });
+
+                    let fid = func.id.expect("func id must exist");
+                    ctx.types.fn_sigs.insert(fid, (param_tys, ret_ty));
+                    resolve_func_flat(func, &mut ctx, &mut scope);
+                    ctx.funcs.insert(fid, func.clone());
+                }
             }
         }
 
@@ -705,6 +843,8 @@ pub fn init_context(mods: &mut [Module]) -> Context {
 
     // Builtin memory permutation: Send <-> Receive.
     ctx.register_memory_permutation("Send", "Receive");
+    // Instruction-level permutation used for CPU <-> chip wiring.
+    ctx.register_memory_permutation("SendInstruction", "ReceiveInstruction");
 
     ctx
 }

@@ -9,13 +9,26 @@ BIN="$ROOT/target/debug/certzero"
 RESULTS="$ROOT/benchmark_results.txt"
 
 CASES=(
-  "SP1/Add/add.cz z3_nia"
-  "SP1/Add4/add4.cz z3_nia"
-  "SP1/And/and.cz z3_nia"
-  "SP1/IsEqualWordOperation/is_equal.cz cvc5_ff"
-  "SP1/IsZeroOperation/is_zero.cz cvc5_ff"
-  "SP1/IsZeroWordOperation/is_zero_word.cz cvc5_ff"
-  "SP1/MapRead/map_read.cz z3_nia"
+  "Component/SP1/Add/add.cz z3_nia"
+  "Component/SP1/Add4/add4.cz z3_nia"
+  "Component/SP1/And/and.cz z3_nia"
+  "Component/SP1/IsEqualWordOperation/is_equal.cz cvc5_ff"
+  "Component/SP1/IsZeroOperation/is_zero.cz cvc5_ff"
+  "Component/SP1/IsZeroWordOperation/is_zero_word.cz cvc5_ff"
+  "Component/SP1/MapRead/map_read.cz z3_nia"
+  "Component/Ziren/Or/or.cz z3_nia"
+  "Component/Ziren/Xor/xor.cz z3_nia"
+  "Component/Ziren/IsZeroOperation/is_zero.cz cvc5_ff"
+  "Component/Ziren/IsZeroWordOperation/is_zero_word.cz cvc5_ff"
+  "Component/Ziren/IsEqualWordOperation/is_equal.cz cvc5_ff"
+  "Component/Ziren/KoalaBearRange/koala_bear_range.cz z3_nia"
+  "Component/Ziren/KoalaBearWord/koala_bear_word.cz z3_nia"
+  "Component/Ziren/FixedShiftRight/fixed_shift_right.cz z3_nia"
+  "Component/Ziren/FixedRotateRight/fixed_rotate_right.cz z3_nia"
+  "Component/Ziren/AddDouble/adddouble.cz z3_nia"
+  "Component/Ziren/Cmp/gt_bytes.cz z3_nia"
+  "Component/Ziren/Cmp/assert_lt_bytes.cz z3_nia"
+  "Component/Ziren/Cmp/assert_lt_bits8.cz z3_nia"
 )
 
 echo "[bench] building..."
@@ -32,7 +45,8 @@ for entry in "${CASES[@]}"; do
   fi
 
   start_ns=$(date +%s%N)
-  if output=$("$BIN" --solver "$solver" "$rel_path" 2>&1); then
+  # Explicitly run in component mode to match benchmark expectations.
+  if output=$("$BIN" --mode component --solver "$solver" "$rel_path" 2>&1); then
     status="ok"
   else
     status="fail"

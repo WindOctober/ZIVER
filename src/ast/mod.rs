@@ -14,6 +14,13 @@ pub enum Item {
         path: Vec<String>,
     },
 
+    // `Enum ...`
+    Enum {
+        id: Option<i64>,
+        name: String,
+        variants: Vec<EnumVariant>,
+    },
+
     // `const <type> <name> = <expr>;`
     Const {
         id: Option<i64>,
@@ -36,6 +43,20 @@ pub enum Item {
         members: Vec<Member>,
         query: Option<Query>,
     },
+
+    // Top-level free function: `fn name(params) { ... }`
+    Function {
+        id: Option<i64>,
+        func: Func,
+    },
+}
+
+/// Single enum variant with an optional explicit discriminant.
+#[derive(Debug, Clone)]
+pub struct EnumVariant {
+    pub id: Option<i64>,
+    pub name: String,
+    pub value: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -70,7 +70,10 @@ impl Type {
     pub fn is_scalar(&self, ctx: &Context) -> bool {
         match self {
             Type::Path { .. } => {
-                matches!(ctx.classify_type(self), Ok(PathKind::Builtin))
+                matches!(
+                    ctx.classify_type(self),
+                    Ok(PathKind::Builtin) | Ok(PathKind::Enum(_))
+                )
             }
             Type::Map { .. } => false,
             _ => false,

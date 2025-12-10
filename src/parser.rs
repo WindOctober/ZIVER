@@ -39,7 +39,9 @@ fn parse_item(p: Pair<Rule>) -> Result<Item> {
     Ok(match inner.as_rule() {
         Rule::import => parse_import(inner)?,
         Rule::const_decl => parse_const(inner)?,
+        Rule::enum_decl => parse_enum(inner)?,
         Rule::struct_decl => parse_struct(inner)?,
+        Rule::function => parse_function(inner)?,
         Rule::component => parse_component(inner)?,
         _ => unreachable!("unexpected item rule"),
     })
@@ -66,6 +68,39 @@ fn parse_const(p: Pair<Rule>) -> Result<Item> {
     })
 }
 
+/// `Enum Name { Variant (= value)? , ... }`
+fn parse_enum(p: Pair<Rule>) -> Result<Item> {
+    let mut it = p.into_inner();
+    let name = it.next().unwrap().as_str().to_string();
+    let mut variants = Vec::new();
+    for v in it {
+        if v.as_rule() == Rule::enum_variant {
+            variants.push(parse_enum_variant(v)?);
+        }
+    }
+    Ok(Item::Enum {
+        id: None,
+        name,
+        variants,
+    })
+}
+
+/// enum variant := ident ( "=" expr )? ("," | ";")
+fn parse_enum_variant(p: Pair<Rule>) -> Result<EnumVariant> {
+    let mut it = p.into_inner();
+    let name = it
+        .next()
+        .ok_or_else(|| anyhow!("enum variant missing name"))?
+        .as_str()
+        .to_string();
+    let value = it.next().map(parse_expr).transpose()?;
+    Ok(EnumVariant {
+        id: None,
+        name,
+        value,
+    })
+}
+
 /// `Struct Name { field* }`
 fn parse_struct(p: Pair<Rule>) -> Result<Item> {
     let mut it = p.into_inner();
@@ -81,6 +116,12 @@ fn parse_struct(p: Pair<Rule>) -> Result<Item> {
         name,
         fields,
     })
+}
+
+/// Top-level free function: `fn name(...) { ... }`
+fn parse_function(p: Pair<Rule>) -> Result<Item> {
+    let func = parse_func(p.into_inner())?;
+    Ok(Item::Function { id: None, func })
 }
 
 /// field := io_prefix? ident ":" type_ref ","

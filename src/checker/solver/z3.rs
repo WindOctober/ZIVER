@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, env};
 
 use z3::{
     SatResult, Solver,
@@ -252,11 +252,16 @@ impl Z3NiaBackend {
         }
 
         let solver = self.solver_mut();
-        println!("Z3 (NIA) solving formula...");
+        let trace = env::var("CZC_TRACE").is_ok();
+        if trace {
+            eprintln!("CZC_TRACE: Z3 (NIA) solving formula...");
+        }
         match solver.check() {
             SatResult::Sat => {
-                if let Some(model) = solver.get_model() {
-                    println!("Z3: SAT model:\n{model}");
+                if trace {
+                    if let Some(model) = solver.get_model() {
+                        eprintln!("CZC_TRACE: Z3 SAT model:\n{model}");
+                    }
                 }
                 Ok(true)
             }

@@ -31,6 +31,61 @@ pub enum SymExpr {
     Mod(Box<SymExpr>, Box<SymExpr>), // Integer modulo: models `(mod a b)` for SMT-LIB NIA.
 }
 
+/// Number of bytes used to represent a machine word (u32) in little-endian order.
+pub const WORD_BYTES: usize = 4;
+
+/// Word-level representation used to link a surface u32 value to its byte decomposition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymWord {
+    pub bytes: Vec<SymExpr>,
+}
+
+impl SymWord {
+    pub fn new(bytes: Vec<SymExpr>) -> Self {
+        debug_assert!(
+            !bytes.is_empty(),
+            "word representation must have at least one byte"
+        );
+        Self { bytes }
+    }
+
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn as_slice(&self) -> &[SymExpr] {
+        &self.bytes
+    }
+}
+
+/// Scalar symbolic value that keeps both the surface expression (typed as declared)
+/// and an optional word-level view (little-endian bytes) for machine integers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymValue {
+    pub surface: SymExpr,
+    pub word: Option<SymWord>,
+}
+
+impl SymValue {
+    pub fn plain(surface: SymExpr) -> Self {
+        Self {
+            surface,
+            word: None,
+        }
+    }
+
+    pub fn with_word(surface: SymExpr, bytes: Vec<SymExpr>) -> Self {
+        Self {
+            surface,
+            word: Some(SymWord::new(bytes)),
+        }
+    }
+
+    pub fn word_bytes(&self) -> Option<&[SymExpr]> {
+        self.word.as_ref().map(|w| w.as_slice())
+    }
+}
+
 /// Boolean expressions used in guards and `ite`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BoolExpr {

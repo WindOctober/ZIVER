@@ -1,0 +1,75 @@
+// Ziren/crates/core/machine/src/operations/cmp.rs (AssertLtColsBits, N=8)
+
+const usize NBITS = 8;
+
+Struct AssertLtBits8Operation {
+    output bit_flags: [field; NBITS],
+}
+
+Component AssertLtBits8Operation {
+    Computation populate(self, input a_bits: [field; NBITS], input b_bits: [field; NBITS]) -> field {
+        field found = 0;
+        self.bit_flags[0] = 0; self.bit_flags[1] = 0; self.bit_flags[2] = 0; self.bit_flags[3] = 0;
+        self.bit_flags[4] = 0; self.bit_flags[5] = 0; self.bit_flags[6] = 0; self.bit_flags[7] = 0;
+
+        // Assume a_bits represent a binary number < b_bits; find first most-significant inequality.
+        if (found == 0 && a_bits[7] < b_bits[7]) { self.bit_flags[7] = 1; found = 1; }
+        if (found == 0 && a_bits[6] < b_bits[6]) { self.bit_flags[6] = 1; found = 1; }
+        if (found == 0 && a_bits[5] < b_bits[5]) { self.bit_flags[5] = 1; found = 1; }
+        if (found == 0 && a_bits[4] < b_bits[4]) { self.bit_flags[4] = 1; found = 1; }
+        if (found == 0 && a_bits[3] < b_bits[3]) { self.bit_flags[3] = 1; found = 1; }
+        if (found == 0 && a_bits[2] < b_bits[2]) { self.bit_flags[2] = 1; found = 1; }
+        if (found == 0 && a_bits[1] < b_bits[1]) { self.bit_flags[1] = 1; found = 1; }
+        if (found == 0 && a_bits[0] < b_bits[0]) { self.bit_flags[0] = 1; found = 1; }
+
+        // Return first flag to keep deterministic.
+        return self.bit_flags[0];
+    }
+
+    Constraint eval(cols: AssertLtBits8Operation, input a_bits: [field; NBITS], input b_bits: [field; NBITS], is_real: Selector) {
+        assert_bool(is_real);
+        assert_eq(is_real, 1);
+
+        for i in 0..NBITS {
+            assert_bool(a_bits[i]);
+            assert_bool(b_bits[i]);
+        }
+
+        field sum_flags = 0;
+        assert_bool(cols.bit_flags[0]); sum_flags = sum_flags + cols.bit_flags[0];
+        assert_bool(cols.bit_flags[1]); sum_flags = sum_flags + cols.bit_flags[1];
+        assert_bool(cols.bit_flags[2]); sum_flags = sum_flags + cols.bit_flags[2];
+        assert_bool(cols.bit_flags[3]); sum_flags = sum_flags + cols.bit_flags[3];
+        assert_bool(cols.bit_flags[4]); sum_flags = sum_flags + cols.bit_flags[4];
+        assert_bool(cols.bit_flags[5]); sum_flags = sum_flags + cols.bit_flags[5];
+        assert_bool(cols.bit_flags[6]); sum_flags = sum_flags + cols.bit_flags[6];
+        assert_bool(cols.bit_flags[7]); sum_flags = sum_flags + cols.bit_flags[7];
+        assert_eq(sum_flags, 1);
+
+        // The flagged position must have a_bit = 0 and b_bit = 1.
+        for i in 0..NBITS {
+            assert_eq(cols.bit_flags[i] * a_bits[i], 0);
+            assert_eq(cols.bit_flags[i] * (b_bits[i] - 1), 0);
+        }
+
+        // Equality before first inequality (MSB to LSB).
+        field eq_mask = 1;
+        assert_eq(eq_mask * (a_bits[7] - b_bits[7]), 0);
+        eq_mask = eq_mask * (1 - cols.bit_flags[7]);
+        assert_eq(eq_mask * (a_bits[6] - b_bits[6]), 0);
+        eq_mask = eq_mask * (1 - cols.bit_flags[6]);
+        assert_eq(eq_mask * (a_bits[5] - b_bits[5]), 0);
+        eq_mask = eq_mask * (1 - cols.bit_flags[5]);
+        assert_eq(eq_mask * (a_bits[4] - b_bits[4]), 0);
+        eq_mask = eq_mask * (1 - cols.bit_flags[4]);
+        assert_eq(eq_mask * (a_bits[3] - b_bits[3]), 0);
+        eq_mask = eq_mask * (1 - cols.bit_flags[3]);
+        assert_eq(eq_mask * (a_bits[2] - b_bits[2]), 0);
+        eq_mask = eq_mask * (1 - cols.bit_flags[2]);
+        assert_eq(eq_mask * (a_bits[1] - b_bits[1]), 0);
+        eq_mask = eq_mask * (1 - cols.bit_flags[1]);
+        assert_eq(eq_mask * (a_bits[0] - b_bits[0]), 0);
+    }
+
+    Query(populate, self, a_bits, b_bits; eval, cols, a_bits, b_bits)
+}

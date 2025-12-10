@@ -1,0 +1,117 @@
+import input;
+import ops::add_operation;
+
+Struct AddSubCols {
+    pc: field,
+    next_pc: field,
+
+    // Embedded AddOperation columns (reused from ops).
+    add_operation: AddOperation,
+
+    // Operands laid out as in Rust: operand_1 = b for ADD, a for SUB; operand_2 = c.
+    operand_1: Word,
+    operand_2: Word,
+
+    // Opcode selectors.
+    is_add: field,
+    is_sub: field,
+
+}
+
+Component AddSubChip {
+    Computation populate(self, ev: AluEvent) -> AddSubCols {
+        AddSubCols cols;
+        cols.pc = ev.pc;
+        cols.next_pc = ev.next_pc;
+
+        // Selectors.
+        cols.is_add = ev.opcode == Opcode::ADD;
+        cols.is_sub = ev.opcode == Opcode::SUB;
+
+        // Operand selection (matches Rust event_to_row).
+        u32 operand_1 = ev.a;
+        if (cols.is_add == 1) {
+            operand_1 = ev.b;
+        }
+        u32 operand_2 = ev.c;
+
+        // Populate embedded add operation with selected operands (u32 inputs, byte outputs).
+        AddOperation::populate(cols.add_operation, operand_1, operand_2);
+
+        // Store operand words for constraint phase.
+        Word op1;
+        Word op2;
+        for i in 0..WORD_SIZE {
+            op1.bytes[i] = to_bytes(operand_1)[i];
+            op2.bytes[i] = to_bytes(operand_2)[i];
+        }
+        cols.operand_1 = op1;
+        cols.operand_2 = op2;
+
+        return cols;
+    }
+
+    Constraint eval(cols: AddSubCols) {
+        field next_next_pc = cols.next_pc + 4;
+        field is_real = cols.is_add + cols.is_sub;
+
+        assert_bool(cols.is_add);
+        assert_bool(cols.is_sub);
+        assert_bool(is_real);
+
+        // Re-run add operation constraints gated by is_real.
+        AddOperation::eval(cols.add_operation, cols.operand_1, cols.operand_2, is_real);
+
+        // Wrap the add result bytes as Word for downstream use.
+        Word add_word;
+        for i in 0..WORD_SIZE {
+            add_word.bytes[i] = cols.add_operation.value[i];
+        }
+        Word op1 = cols.operand_1;
+        Word op2 = cols.operand_2;
+        Word zero;
+        for i in 0..WORD_SIZE { zero.bytes[i] = 0; }
+
+        // ADD: a = operand_1 + operand_2 (result in add_value).
+        lookup ReceiveInstruction(
+            0,                 // shard
+            0,                 // clk
+            cols.pc,
+            cols.next_pc,
+            next_next_pc,
+            0,                 // num_extra_cycles
+            Opcode::ADD,
+            add_word,  // a (result)
+            op1,    // b
+            op2,    // c
+            zero, // hi (zero)
+            0,                 // op_a_immutable
+            0,                 // is_rw_a
+            0,                 // is_check_memory
+            0,                 // is_halt
+            1,                 // is_sequential
+            cols.is_add        // multiplicity
+        );
+
+        // SUB: operand_1 = add_value + operand_2 (re-arranged as in Rust).
+        lookup ReceiveInstruction(
+            0,                 // shard
+            0,                 // clk
+            cols.pc,
+            cols.next_pc,
+            next_next_pc,
+            0,                 // num_extra_cycles
+            Opcode::SUB,
+            op1,    // a (original lhs)
+            add_word,    // b (result of a - c)
+            op2,    // c
+            zero, // hi (zero)
+            0,                 // op_a_immutable
+            0,                 // is_rw_a
+            0,                 // is_check_memory
+            0,                 // is_halt
+            1,                 // is_sequential
+            cols.is_sub        // multiplicity
+        );
+    }
+}

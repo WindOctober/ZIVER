@@ -1,0 +1,86 @@
+const usize WORD_SIZE = 4;
+const field BASE = 256;
+
+Enum ByteOpcode {
+    ADD = 0;
+    AND = 1;
+    OR = 2;
+    XOR = 3;
+}
+
+Struct AddOperation {
+    output value: [field; WORD_SIZE],
+    output carry: [field; 3],
+}
+
+Component AddOperation {
+    Computation populate(self, a: u32, b: u32) {
+        field s0 = to_bytes(a)[0] + to_bytes(b)[0];
+        if (s0 >= BASE) {
+            self.carry[0] = 1;
+            s0 = s0 - BASE;
+        } else {
+            self.carry[0] = 0;
+        }
+        self.value[0] = s0;
+
+        field s1 = to_bytes(a)[1] + to_bytes(b)[1] + self.carry[0];
+        if (s1 >= BASE) {
+            self.carry[1] = 1;
+            s1 = s1 - BASE;
+        } else {
+            self.carry[1] = 0;
+        }
+        self.value[1] = s1;
+
+        field s2 = to_bytes(a)[2] + to_bytes(b)[2] + self.carry[1];
+        if (s2 >= BASE) {
+            self.carry[2] = 1;
+            s2 = s2 - BASE;
+        } else {
+            self.carry[2] = 0;
+        }
+        self.value[2] = s2;
+
+        field s3 = to_bytes(a)[3] + to_bytes(b)[3] + self.carry[2];
+        if (s3 >= BASE) {
+            s3 = s3 - BASE;
+        }
+        self.value[3] = s3;
+    }
+
+    Constraint eval(cols: AddOperation, a: u32, b: u32, is_real: Selector) {
+        field one = 1;
+
+        field overflow_0 = to_bytes(a)[0] + to_bytes(b)[0] - cols.value[0];
+        field overflow_1 = to_bytes(a)[1] + to_bytes(b)[1] - cols.value[1] + cols.carry[0];
+        field overflow_2 = to_bytes(a)[2] + to_bytes(b)[2] - cols.value[2] + cols.carry[1];
+        field overflow_3 = to_bytes(a)[3] + to_bytes(b)[3] - cols.value[3] + cols.carry[2];
+
+        // overflow_3 must be 0 or BASE.
+        assert_zero(is_real * overflow_3 * (overflow_3 - BASE));
+
+        // If carry is 1 then overflow_i == BASE, else overflow_i == 0.
+        assert_zero(is_real * cols.carry[0] * (overflow_0 - BASE));
+        assert_zero(is_real * cols.carry[1] * (overflow_1 - BASE));
+        assert_zero(is_real * cols.carry[2] * (overflow_2 - BASE));
+
+        assert_zero(is_real * (cols.carry[0] - one) * overflow_0);
+        assert_zero(is_real * (cols.carry[1] - one) * overflow_1);
+        assert_zero(is_real * (cols.carry[2] - one) * overflow_2);
+
+        // Carries are boolean and row is active.
+        assert_zero(is_real * cols.carry[0] * (cols.carry[0] - one));
+        assert_zero(is_real * cols.carry[1] * (cols.carry[1] - one));
+        assert_zero(is_real * cols.carry[2] * (cols.carry[2] - one));
+        assert_eq(is_real, one);
+
+        // Range check each byte of inputs and output.
+        for i in 0..WORD_SIZE {
+            lookup(ByteChip, ByteOpcode::ADD, 0, to_bytes(a)[i], to_bytes(b)[i]);
+            lookup(ByteChip, ByteOpcode::ADD, 0, cols.value[i], 0);
+        }
+    }
+
+    Query(populate, self, a, b; eval, cols, a, b)
+}

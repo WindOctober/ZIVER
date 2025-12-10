@@ -33,7 +33,7 @@ pub fn eval_index_const_or_err(ctx: &Context, store: Option<&Store>, e: &Expr) -
                     ref_id: *ref_id,
                     segments: segments.clone(),
                 }) {
-                    if let SymExpr::Int(k) = node {
+                    if let SymExpr::Int(k) = node.surface {
                         if k >= 0 && (k as u128) <= (usize::MAX as u128) {
                             return Some(k as usize);
                         }

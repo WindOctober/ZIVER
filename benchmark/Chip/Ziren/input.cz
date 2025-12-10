@@ -1,0 +1,101 @@
+// Shared input structures for Ziren chips (VM-style verification).
+
+const usize WORD_SIZE = 4;
+
+// Opcode enum aligned with Ziren VM expectations (subset used by benchmarks).
+Enum Opcode {
+    ADD = 0;
+    SUB = 1;
+}
+
+// Basic word abstraction (little endian bytes).
+Struct Word {
+    bytes: [field; WORD_SIZE],
+}
+
+// Instruction layout matching CpuCols::instruction fields.
+Struct Instruction {
+    opcode: Opcode,
+    op_a: field,
+    op_b: Word,
+    op_c: Word,
+    // Immediate flags as field (0/1).
+    imm_b: field,
+    imm_c: field,
+}
+
+// CPU event as produced by executor: per-instruction row for CpuChip.
+Struct CpuEvent {
+    shard: field,
+    clk: field, // flattened; limbs are derived later.
+    pc: u32,
+    next_pc: u32,
+    next_next_pc: u32,
+    instruction: Instruction,
+    num_extra_cycles: field,
+    is_rw_a: field,
+    is_check_memory: field,
+    is_halt: field,
+    is_sequential: field,
+    op_a_value: Word,
+    hi_or_prev_a: Word,
+    op_b_value: Word,
+    op_c_value: Word,
+    op_a_immutable: field,
+    is_real: field,
+}
+
+// ALU event (add/sub/bitwise/etc.)
+Struct AluEvent {
+    pc: u32,
+    next_pc: u32,
+    opcode: Opcode,
+    hi: u32,
+    a: u32,
+    b: u32,
+    c: u32,
+}
+
+// Branch event.
+Struct BranchEvent {
+    pc: u32,
+    next_pc: u32,
+    next_next_pc: u32,
+    opcode: Opcode,
+    a: u32,
+    b: u32,
+    c: u32,
+}
+
+// Jump event.
+Struct JumpEvent {
+    pc: u32,
+    next_pc: u32,
+    next_next_pc: u32,
+    opcode: Opcode,
+    a: u32,
+    b: u32,
+    c: u32,
+}
+
+// Memory instruction event.
+Struct MemInstrEvent {
+    pc: u32,
+    next_pc: u32,
+    opcode: Opcode,
+    a: u32,
+    b: u32,
+    c: u32,
+    prev_a_val: u32,
+}
+
+// Syscall event.
+Struct SyscallEvent {
+    clk: u32,
+    pc: u32,
+    next_pc: u32,
+    syscall_code: u32,
+    a0: u32,
+    a1: u32,
+    exit_code: u32,
+}
