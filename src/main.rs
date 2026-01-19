@@ -63,6 +63,13 @@ pub struct Args {
     #[arg(long, value_name = "CMD", default_value = "cvc5")]
     pub cvc5_cmd: String,
 
+    /// Relax (potentially unsound) finite-field encoding for wide integer ranges in `cvc5_ff`.
+    ///
+    /// This is intended for debugging / formula export when the program introduces ranges
+    /// that exceed the field modulus (e.g. u32 ranges in the BabyBear field).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub ff_relax: bool,
+
     /// Choose verification mode: component (single entry file) or vm (scan directory).
     #[arg(long, value_enum, default_value_t = RunMode::Component)]
     pub mode: RunMode,

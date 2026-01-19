@@ -7,6 +7,9 @@ use crate::checker::symbolic::expr::{BoolExpr, SymExpr, SymType};
 /// cvc5 backend using QF_FF for field constraints.
 pub struct Cvc5ffBackend {
     field_modulus: i128,
+    /// If enabled, allow encodings that can be semantically unsound due to wrap-around modulo p.
+    /// Intended for debugging / formula export only.
+    relaxed: bool,
     vars: HashMap<String, SymType>,
     asserts: Vec<String>,
     range_fresh: usize,
@@ -15,9 +18,10 @@ pub struct Cvc5ffBackend {
 }
 
 impl Cvc5ffBackend {
-    pub fn new(field_modulus: i128) -> Self {
+    pub fn new(field_modulus: i128, relaxed: bool) -> Self {
         Self {
             field_modulus,
+            relaxed,
             vars: HashMap::new(),
             asserts: Vec::new(),
             range_fresh: 0,
@@ -162,8 +166,12 @@ impl Cvc5ffBackend {
         value: &SymExpr,
         bits: usize,
     ) -> Result<String, String> {
-        if bits == 0 || bits > 24 {
-            return Err("cvc5-ff: byte decomposition only supports 1..24 bits".to_string());
+        let max_bits = if self.relaxed { 64 } else { 24 };
+        if bits == 0 || bits > max_bits {
+            return Err(format!(
+                "cvc5-ff: byte decomposition only supports 1..{} bits (set --ff-relax to allow wider encodings)",
+                max_bits
+            ));
         }
 
         let target = self.encode_term(value)?;
@@ -496,6 +504,12 @@ impl Cvc5ffBackend {
                     return Err("cvc5-ff: only non-negative ranges are supported".to_string());
                 }
 
+                // Field range constraints are implicit in QF_FF: every term is already an element
+                // of F, and QF_FF provides no ordering to express canonical representatives.
+                if *max == self.field_modulus - 1 {
+                    return Ok("true".to_string());
+                }
+
                 let bw = bits.ok_or_else(|| {
                     "cvc5-ff: bit-width hint is required for range predicates".to_string()
                 })?;
@@ -505,6 +519,16 @@ impl Cvc5ffBackend {
                     return Err(format!(
                         "cvc5-ff: range upper bound must be 2^bits-1 (got {}, bits={})",
                         max, bw
+                    ));
+                }
+
+                // For semantic soundness, we must avoid wrap-around modulo p. If 2^bits-1 >= p,
+                // the decomposition constrains an integer-like value but equality is interpreted
+                // modulo p, so the intended range semantics are not preserved.
+                if !self.relaxed && expected_max >= self.field_modulus {
+                    return Err(format!(
+                        "cvc5-ff: cannot soundly encode {}-bit range under modulus p={} (max={} >= p); use z3_nia or set --ff-relax to export a relaxed formula",
+                        bw, self.field_modulus, expected_max
                     ));
                 }
 
@@ -566,8 +590,11 @@ impl Cvc5ffBackend {
         self.assert_bool(phi)?;
         let script = self.build_script();
 
-        if std::env::var("CVC5_DUMP").is_ok() {
+        if std::env::var("CVC5_DUMP").is_ok() || std::env::var("CVC5_DUMP_ONLY").is_ok() {
             let _ = std::fs::write("cvc5_debug.smt2", &script);
+        }
+        if std::env::var("CVC5_DUMP_ONLY").is_ok() {
+            return Err("CVC5_DUMP_ONLY set; solver run skipped after dump".to_string());
         }
 
         let mut child = Command::new(cmd)

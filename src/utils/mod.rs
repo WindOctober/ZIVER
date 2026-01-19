@@ -5,6 +5,7 @@ pub mod module_resolver;
 pub struct SetConfig {
     pub type_refine: bool,
     pub solver: SolverConfig,
+    pub ff_relax: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -46,5 +47,6 @@ pub fn derive_config(args: Args) -> SetConfig {
             kind: solver_kind,
             cvc5_cmd: args.cvc5_cmd,
         },
+        ff_relax: args.ff_relax,
     }
 }
