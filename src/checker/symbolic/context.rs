@@ -232,14 +232,15 @@ impl Context {
         // Comparison and equality always return Bool if operands are compatible.
         match op {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                let compatible = match (&lhs, &rhs) {
-                    (F, F) => true,
-                    (Uint(_), Uint(_)) => true,
-                    (Int(_), Int(_)) => true,
-                    (Bool, Bool) => true,
-                    (Bool, Uint(_)) | (Uint(_), Bool) => true,
-                    _ => false,
-                };
+                let compatible = matches!(
+                    (&lhs, &rhs),
+                    (F, F)
+                        | (Uint(_), Uint(_))
+                        | (Int(_), Int(_))
+                        | (Bool, Bool)
+                        | (Bool, Uint(_))
+                        | (Uint(_), Bool)
+                );
                 if compatible {
                     return Some(Bool);
                 } else {
@@ -410,11 +411,10 @@ impl Context {
                     }
                 }
                 // Fallback to known builtin constants (e.g., `one`, `zero`).
-                if let Some(last) = segments.last() {
-                    if let Some((_val, ty)) = self.builtin_const(last) {
+                if let Some(last) = segments.last()
+                    && let Some((_val, ty)) = self.builtin_const(last) {
                         return Some(ty);
                     }
-                }
                 None
             }
 
@@ -427,8 +427,8 @@ impl Context {
                         return Some(Type::Function { ref_id: Some(id) });
                     }
                 }
-                if let Expr::MapIndex { base: map_base, .. } = base.as_ref() {
-                    if let Some(Type::Map {
+                if let Expr::MapIndex { base: map_base, .. } = base.as_ref()
+                    && let Some(Type::Map {
                         timestamp, value, ..
                     }) = self.infer_expr_type_static(map_base)
                     {
@@ -440,12 +440,10 @@ impl Context {
                             _ => None,
                         };
                     }
-                }
-                if let Some(Type::Tuple(elems)) = self.infer_expr_type_static(base) {
-                    if let Ok(idx) = name.parse::<usize>() {
+                if let Some(Type::Tuple(elems)) = self.infer_expr_type_static(base)
+                    && let Ok(idx) = name.parse::<usize>() {
                         return elems.get(idx).cloned();
                     }
-                }
                 // Fallback: use the base expression type if we cannot resolve field id directly.
                 self.infer_expr_type_static(base)
             }
@@ -521,15 +519,12 @@ impl Context {
     /// Handles qualified methods like `TypeName::method(...)`.
     pub fn resolve_call_from_lvalue(&self, callee: &LValue) -> (i64, Option<SymExpr>) {
         // Qualified static method: TypeName::method(...)
-        if let Some(struct_id) = callee.ref_id {
-            if callee.tails.len() == 1 {
-                if let LvTail::Field { name } = &callee.tails[0] {
-                    if let Some(fid) = self.resolve_method_on_struct(struct_id, name.as_str()) {
+        if let Some(struct_id) = callee.ref_id
+            && callee.tails.len() == 1
+                && let LvTail::Field { name } = &callee.tails[0]
+                    && let Some(fid) = self.resolve_method_on_struct(struct_id, name.as_str()) {
                         return (fid, None);
                     }
-                }
-            }
-        }
 
         // Fallback: use ref_id as a function id if present.
         if let Some(fid) = callee.ref_id {
@@ -888,9 +883,8 @@ fn resolve_expr_ids_flat(e: &mut Expr, scope: &Scope, ctx: &mut Context) {
                 ref_id: Some(struct_id),
                 ..
             }) = base_ty
-            {
-                if let Some(members) = ctx.struct_fields.get(&struct_id) {
-                    if let Some(member) = members.get(name) {
+                && let Some(members) = ctx.struct_fields.get(&struct_id)
+                    && let Some(member) = members.get(name) {
                         match member {
                             MemberIndex::Field { field_id } => {
                                 *ref_id = Some(*field_id);
@@ -899,10 +893,7 @@ fn resolve_expr_ids_flat(e: &mut Expr, scope: &Scope, ctx: &mut Context) {
                                 *ref_id = Some(*func_id);
                             }
                         }
-                        return;
                     }
-                }
-            }
             // Unknown member or non-struct base: keep ref_id=None for later diagnostics.
         }
 

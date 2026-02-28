@@ -82,10 +82,7 @@ where
                 let mut acc = first;
                 for x in it {
                     let xr = go(x, hint_for)?;
-                    acc = match range_mul(acc, xr) {
-                        Some(r) => r,
-                        None => return None,
-                    };
+                    acc = range_mul(acc, xr)?;
                 }
                 Some(acc)
             }
@@ -117,11 +114,10 @@ where
                 Some((std::cmp::min(rt.0, re.0), std::cmp::max(rt.1, re.1)))
             }
             SymExpr::Mod(_, m) => {
-                if let SymExpr::Int(k) = **m {
-                    if k > 0 {
+                if let SymExpr::Int(k) = **m
+                    && k > 0 {
                         return Some((0, k - 1));
                     }
-                }
                 None
             }
         }

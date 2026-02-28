@@ -147,14 +147,12 @@ impl Func {
                 name,
                 ..
             } = p
-            {
-                if name == head {
+                && name == head {
                     return Ok(Expr::Path {
                         segments: vec![head.clone()],
                         ref_id: Some(*vid),
                     });
                 }
-            }
         }
 
         Err(format!(

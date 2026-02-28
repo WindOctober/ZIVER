@@ -110,7 +110,7 @@ pub enum BoolExpr {
 
 impl BoolExpr {
     /// Interpret this Boolean as an integer 0/1 expression.
-    pub fn as_int(self) -> SymExpr {
+    pub fn into_int(self) -> SymExpr {
         SymExpr::ite(self, SymExpr::Int(1), SymExpr::Int(0))
     }
 }
@@ -418,11 +418,11 @@ impl BoolExpr {
                 }
                 write!(f, "(and")?;
                 for x in xs {
-                    write!(f, "\n")?;
+                    writeln!(f)?;
                     write_indent(f, indent + 2)?;
                     x.fmt_with_indent(f, indent + 2)?;
                 }
-                write!(f, "\n")?;
+                writeln!(f)?;
                 write_indent(f, indent)?;
                 write!(f, ")")
             }
@@ -433,11 +433,11 @@ impl BoolExpr {
                 }
                 write!(f, "(or")?;
                 for x in xs {
-                    write!(f, "\n")?;
+                    writeln!(f)?;
                     write_indent(f, indent + 2)?;
                     x.fmt_with_indent(f, indent + 2)?;
                 }
-                write!(f, "\n")?;
+                writeln!(f)?;
                 write_indent(f, indent)?;
                 write!(f, ")")
             }

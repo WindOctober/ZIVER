@@ -16,18 +16,15 @@ const DEFAULT_BENCHMARK: &str = "benchmark/Component/SP1/IsZeroWordOperation/is_
 
 /// Command-line interface for the CZ parser.
 #[derive(ValueEnum, Clone, Debug)]
+#[derive(Default)]
 pub enum RunMode {
     /// Component-by-component equivalence (current default).
+    #[default]
     Component,
     /// VM-style bundle: scan a directory of .cz files and group compute/constraint/input.
     Vm,
 }
 
-impl Default for RunMode {
-    fn default() -> Self {
-        RunMode::Component
-    }
-}
 
 /// Command-line interface for the CZ parser.
 #[derive(Parser, Debug, Clone)]
@@ -62,13 +59,6 @@ pub struct Args {
     /// Command or path used to invoke cvc5 when `--solver cvc5_ff` is selected.
     #[arg(long, value_name = "CMD", default_value = "cvc5")]
     pub cvc5_cmd: String,
-
-    /// Relax (potentially unsound) finite-field encoding for wide integer ranges in `cvc5_ff`.
-    ///
-    /// This is intended for debugging / formula export when the program introduces ranges
-    /// that exceed the field modulus (e.g. u32 ranges in the BabyBear field).
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub ff_relax: bool,
 
     /// Choose verification mode: component (single entry file) or vm (scan directory).
     #[arg(long, value_enum, default_value_t = RunMode::Component)]

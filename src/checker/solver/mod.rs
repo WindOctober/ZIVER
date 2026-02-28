@@ -11,7 +11,7 @@ pub use z3::Z3NiaBackend;
 #[derive(Clone, Debug)]
 pub enum SmtBackend {
     Z3Nia,
-    Cvc5Ff { cmd: String, relaxed: bool },
+    Cvc5Ff { cmd: String },
 }
 
 /// Select an SMT backend from user configuration.
@@ -20,7 +20,6 @@ pub fn backend_from_config(config: &SetConfig) -> SmtBackend {
         SolverKind::Z3Nia => SmtBackend::Z3Nia,
         SolverKind::Cvc5Ff => SmtBackend::Cvc5Ff {
             cmd: config.solver.cvc5_cmd.clone(),
-            relaxed: config.ff_relax,
         },
     }
 }
@@ -32,8 +31,8 @@ pub fn check_with_solver(phi: &BoolExpr, backend: SmtBackend) -> Result<bool, St
             let backend = Z3NiaBackend::new();
             backend.check(phi)
         }
-        SmtBackend::Cvc5Ff { cmd, relaxed } => {
-            let backend = Cvc5ffBackend::new(FIELD_MODULUS, relaxed);
+        SmtBackend::Cvc5Ff { cmd } => {
+            let backend = Cvc5ffBackend::new(FIELD_MODULUS);
             backend.check(phi, &cmd)
         }
     }

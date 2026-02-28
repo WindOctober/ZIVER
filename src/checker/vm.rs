@@ -3,7 +3,7 @@ use std::{collections::HashMap, rc::Rc};
 use crate::{
     ast::{File, Func, Item, Member, Param, Stmt, Type},
     checker::{
-        solver::{SmtBackend, backend_from_config, check_with_solver},
+        solver::{backend_from_config, check_with_solver},
         symbolic::{
             context::Context,
             execute::SymbolicExecutor,
@@ -86,12 +86,11 @@ fn collect_chips(mods: &[File], executor_name: &str) -> Vec<ChipSpec> {
 fn collect_param_nodes_by_type(state: &SymState, func: &Func) -> HashMap<i64, StoreNode> {
     let mut out = HashMap::new();
     for p in &func.params {
-        if let Param::Typed { id, ty, .. } = p {
-            if let (Some(vid), Some(tid)) = (id, type_ref_id(ty)) {
-                if let Some(node) = state.store.get(*vid) {
-                    out.insert(tid, node.clone());
-                }
-            }
+        if let Param::Typed { id, ty, .. } = p
+            && let (Some(vid), Some(tid)) = (id, type_ref_id(ty))
+            && let Some(node) = state.store.get(*vid)
+        {
+            out.insert(tid, node.clone());
         }
     }
     out
@@ -99,14 +98,12 @@ fn collect_param_nodes_by_type(state: &SymState, func: &Func) -> HashMap<i64, St
 
 fn find_event_node(func: &Func, st: &SymState, ty_id: i64) -> Option<StoreNode> {
     for p in &func.params {
-        if let Param::Typed { id, ty, .. } = p {
-            if type_ref_id(ty) == Some(ty_id) {
-                if let Some(vid) = id {
-                    if let Some(node) = st.store.get(*vid) {
-                        return Some(node.clone());
-                    }
-                }
-            }
+        if let Param::Typed { id, ty, .. } = p
+            && type_ref_id(ty) == Some(ty_id)
+            && let Some(vid) = id
+            && let Some(node) = st.store.get(*vid)
+        {
+            return Some(node.clone());
         }
     }
 
@@ -114,15 +111,36 @@ fn find_event_node(func: &Func, st: &SymState, ty_id: i64) -> Option<StoreNode> 
         if let Stmt::VarDecl {
             id: Some(vid), ty, ..
         } = stmt
+            && type_ref_id(ty) == Some(ty_id)
+            && let Some(node) = st.store.get(*vid)
         {
-            if type_ref_id(ty) == Some(ty_id) {
-                if let Some(node) = st.store.get(*vid) {
-                    return Some(node.clone());
-                }
-            }
+            return Some(node.clone());
         }
     }
     None
+}
+
+fn typed_binding(
+    ty: &Type,
+    event_type_id: i64,
+    event_node: &StoreNode,
+    chip_struct_id: Option<i64>,
+    cols_node: Option<&StoreNode>,
+    base_inputs: &HashMap<i64, StoreNode>,
+) -> Option<StoreNode> {
+    if type_ref_id(ty) == Some(event_type_id) {
+        return Some(event_node.clone());
+    }
+
+    if let Some(cid) = chip_struct_id
+        && type_ref_id(ty) == Some(cid)
+        && let Some(cols) = cols_node
+    {
+        return Some(cols.clone());
+    }
+
+    let tid = type_ref_id(ty)?;
+    base_inputs.get(&tid).cloned()
 }
 
 fn build_send_receive_equalities(events: &[MemoryEvent]) -> Result<Vec<BoolExpr>, String> {
@@ -206,12 +224,15 @@ pub fn check_vm_workspace(
                 match p {
                     Param::SelfParam { .. } => {}
                     Param::Typed { name, ty, .. } => {
-                        if type_ref_id(ty) == Some(event_type_id) {
-                            bindings.insert(name.clone(), event_node.clone());
-                        } else if let Some(tid) = type_ref_id(ty) {
-                            if let Some(src) = base_inputs.get(&tid) {
-                                bindings.insert(name.clone(), src.clone());
-                            }
+                        if let Some(node) = typed_binding(
+                            ty,
+                            event_type_id,
+                            &event_node,
+                            None,
+                            None,
+                            &base_inputs,
+                        ) {
+                            bindings.insert(name.clone(), node);
                         }
                     }
                 }
@@ -237,25 +258,20 @@ pub fn check_vm_workspace(
                 for p in &chip.eval.params {
                     match p {
                         Param::SelfParam { .. } => {
-                            if let Some(cols) = cols_node.clone() {
-                                eval_bindings.insert("self".to_string(), cols);
+                            if let Some(cols) = &cols_node {
+                                eval_bindings.insert("self".to_string(), cols.clone());
                             }
                         }
                         Param::Typed { name, ty, .. } => {
-                            if type_ref_id(ty) == Some(event_type_id) {
-                                eval_bindings.insert(name.clone(), event_node.clone());
-                            } else if let Some(cid) = chip_struct_id {
-                                if type_ref_id(ty) == Some(cid) {
-                                    if let Some(cols) = cols_node.clone() {
-                                        eval_bindings.insert(name.clone(), cols);
-                                        continue;
-                                    }
-                                }
-                            }
-                            if let Some(tid) = type_ref_id(ty) {
-                                if let Some(src) = base_inputs.get(&tid) {
-                                    eval_bindings.insert(name.clone(), src.clone());
-                                }
+                            if let Some(node) = typed_binding(
+                                ty,
+                                event_type_id,
+                                &event_node,
+                                chip_struct_id,
+                                cols_node.as_ref(),
+                                &base_inputs,
+                            ) {
+                                eval_bindings.insert(name.clone(), node);
                             }
                         }
                     }

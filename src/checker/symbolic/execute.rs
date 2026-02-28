@@ -34,11 +34,10 @@ fn sym_bounds(sty: &SymType) -> Option<(i128, i128, usize)> {
 
 /// Drop a field modulus reduction when the inferred range already lies inside the field.
 fn mod_if_needed(expr: SymExpr, state: &SymState) -> SymExpr {
-    if let Some((lo, hi)) = state.symexpr_range(&expr) {
-        if lo >= 0 && hi < FIELD_MODULUS {
+    if let Some((lo, hi)) = state.symexpr_range(&expr)
+        && lo >= 0 && hi < FIELD_MODULUS {
             return expr;
         }
-    }
     expr.mod_field()
 }
 
@@ -80,13 +79,11 @@ fn resolve_u32_bytes(
     arg_val: SymExpr,
     hint: &str,
 ) -> (Vec<SymExpr>, SymState) {
-    if let Expr::Path { .. } = arg_expr {
-        if let Some(v) = state.store.query_scalar(arg_expr) {
-            if let Some(word) = v.word {
+    if let Expr::Path { .. } = arg_expr
+        && let Some(v) = state.store.query_scalar(arg_expr)
+            && let Some(word) = v.word {
                 return (word.bytes, state);
             }
-        }
-    }
 
     let (packed, state) = state.pack_scalar_with_symtype(arg_val, &SymType::Uint(32), hint);
     let bytes = packed
@@ -295,7 +292,7 @@ fn write_to_lvalue(ctx: &Context, state: SymState, lv: &LValue, val: SymExpr) ->
             (StoreNode::Array { len, elems }, LvTail::Index(idx_expr)) => {
                 // cur_ty must be an array; advance to inner type
                 let inner = match cur_ty {
-                    Type::Array(inner, _) => (&**inner).clone(),
+                    Type::Array(inner, _) => (**inner).clone(),
                     _ => panic!("indexing on non-array static type"),
                 };
                 *cur_ty = inner;
@@ -306,11 +303,10 @@ fn write_to_lvalue(ctx: &Context, state: SymState, lv: &LValue, val: SymExpr) ->
                             "array index must be a concrete integer literal or constant identifier"
                         )
                     });
-                if let Some(l) = *len {
-                    if idx >= l {
+                if let Some(l) = *len
+                    && idx >= l {
                         panic!("array index {} out of bounds {}", idx, l);
                     }
-                }
                 if tails.len() != 1 {
                     panic!("nested write under array element is not supported");
                 }
@@ -648,11 +644,11 @@ impl SymbolicExecutor for Stmt {
                 // propagation discipline used in function-level symbolic execution.
                 fn exec_block(
                     mut live: Vector<SymState>,
-                    block: &Vec<Stmt>,
+                    block: &[Stmt],
                 ) -> Vector<(Option<SymExpr>, SymState)> {
                     let mut out: Vector<(Option<SymExpr>, SymState)> = Vector::new();
 
-                    for stmt in block.clone() {
+                    for stmt in block {
                         let mut next_live: Vector<SymState> = Vector::new();
 
                         for s in live.into_iter() {
@@ -1037,44 +1033,41 @@ impl Stmt {
             }
         }
 
-        match cond.clone() {
-            BoolExpr::Eq(lhs, rhs) => {
-                if let Some((bool_var, rest)) = extract_bool_factor(lhs, rhs) {
-                    let zero = SymExpr::Int(0);
-                    let one = SymExpr::Int(1);
+        if let BoolExpr::Eq(lhs, rhs) = cond.clone()
+            && let Some((bool_var, rest)) = extract_bool_factor(lhs, rhs)
+        {
+            let zero = SymExpr::Int(0);
+            let one = SymExpr::Int(1);
 
-                    let cond_b0 = bool_var.clone().eq_to(zero.clone());
-                    let cond_b1 = bool_var.clone().eq_to(one);
-                    let cond_r0 = rest.clone().eq_to(zero);
+            let cond_b0 = bool_var.clone().eq_to(zero.clone());
+            let cond_b1 = bool_var.clone().eq_to(one);
+            let cond_r0 = rest.clone().eq_to(zero);
 
-                    let mut out = Vector::new();
-                    let bool_range = state.symexpr_range(&bool_var);
-                    let rest_range = state.symexpr_range(&rest);
+            let mut out = Vector::new();
+            let bool_range = state.symexpr_range(&bool_var);
+            let rest_range = state.symexpr_range(&rest);
 
-                    let bool_can_be_zero = bool_range.map_or(true, |(lo, _hi)| lo <= 0);
-                    let bool_can_be_one = bool_range.map_or(true, |(lo, hi)| hi >= 1 && lo <= 1);
-                    let rest_always_zero = rest_range.map_or(false, |(lo, hi)| lo == 0 && hi == 0);
-                    let rest_can_be_zero = rest_range.map_or(true, |(lo, hi)| lo <= 0 && hi >= 0);
+            let bool_can_be_zero = bool_range.is_none_or(|(lo, _hi)| lo <= 0);
+            let bool_can_be_one = bool_range.is_none_or(|(lo, hi)| hi >= 1 && lo <= 1);
+            let rest_always_zero = rest_range.is_some_and(|(lo, hi)| lo == 0 && hi == 0);
+            let rest_can_be_zero = rest_range.is_none_or(|(lo, hi)| lo <= 0 && hi >= 0);
 
-                    if bool_can_be_zero {
-                        let s1 = state.clone().with_pc(cond_b0);
-                        out.push_back(s1);
-                    }
-                    if bool_can_be_one && rest_can_be_zero {
-                        let mut s2 = state.clone().with_pc(cond_b1);
-                        if !rest_always_zero {
-                            s2 = s2.with_pc(cond_r0);
-                        }
-                        out.push_back(s2);
-                    }
-
-                    if out.is_empty() {
-                        out.push_back(state.with_pc(BoolExpr::Bool(false)));
-                    }
-                    return out;
-                }
+            if bool_can_be_zero {
+                let s1 = state.clone().with_pc(cond_b0);
+                out.push_back(s1);
             }
-            _ => {}
+            if bool_can_be_one && rest_can_be_zero {
+                let mut s2 = state.clone().with_pc(cond_b1);
+                if !rest_always_zero {
+                    s2 = s2.with_pc(cond_r0);
+                }
+                out.push_back(s2);
+            }
+
+            if out.is_empty() {
+                out.push_back(state.with_pc(BoolExpr::Bool(false)));
+            }
+            return out;
         }
 
         Vector::unit(state.with_pc(cond))
@@ -1131,17 +1124,15 @@ impl Expr {
                 }) {
                     return Vector::unit((v.surface.clone(), state));
                 }
-                if let Some(cid) = ref_id {
-                    if let Some(k) = state.ctx.const_int(cid) {
+                if let Some(cid) = ref_id
+                    && let Some(k) = state.ctx.const_int(cid) {
                         return Vector::unit((SymExpr::Int(k as i128), state));
                     }
-                }
                 if ref_id.is_none() {
-                    if let Some(last) = segments.last() {
-                        if let Some((val, _ty)) = state.ctx.builtin_const(last) {
+                    if let Some(last) = segments.last()
+                        && let Some((val, _ty)) = state.ctx.builtin_const(last) {
                             return Vector::unit((val, state));
                         }
-                    }
                     panic!("unresolved path in expression: {:?}", segments);
                 }
                 let id = ref_id.expect("unresolved path in expression");
@@ -1210,9 +1201,9 @@ impl Expr {
 
             Expr::Index(base, idx) => {
                 // Special-case indexing into `to_bytes(<u32>)`.
-                if let Expr::Call(callee, args) = base.as_ref() {
-                    if let Expr::Path { segments, .. } = callee.as_ref() {
-                        if matches!(segments.last().map(String::as_str), Some("to_bytes")) {
+                if let Expr::Call(callee, args) = base.as_ref()
+                    && let Expr::Path { segments, .. } = callee.as_ref()
+                        && matches!(segments.last().map(String::as_str), Some("to_bytes")) {
                             if args.len() != 1 {
                                 panic!("`to_bytes` expects exactly one argument");
                             }
@@ -1238,8 +1229,6 @@ impl Expr {
                                 resolve_u32_bytes(state, &arg_expr, arg_val, "to_bytes_idx");
                             return Vector::unit((bytes[idx_val].clone(), state));
                         }
-                    }
-                }
 
                 let idx_val = eval_index_const_or_err(&state.ctx, Some(&state.store), &idx)
                     .unwrap_or_else(|| {
@@ -1360,7 +1349,7 @@ impl Expr {
             // Treat a literal Boolean as 0/1.
             Expr::Bool(b) => {
                 let cond = BoolExpr::Bool(b);
-                let v = cond.as_int();
+                let v = cond.into_int();
                 Vector::unit((v, state))
             }
 
@@ -1369,42 +1358,42 @@ impl Expr {
                 op: BinOp::Eq,
                 lhs,
                 rhs,
-            } => eval_bin("Eq", *lhs, *rhs, state, |a, b, _| a.eq_to(b).as_int()),
+            } => eval_bin("Eq", *lhs, *rhs, state, |a, b, _| a.eq_to(b).into_int()),
 
             // Inequality as 0/1.
             Expr::Binary {
                 op: BinOp::Ne,
                 lhs,
                 rhs,
-            } => eval_bin("Ne", *lhs, *rhs, state, |a, b, _| a.ne(b).as_int()),
+            } => eval_bin("Ne", *lhs, *rhs, state, |a, b, _| a.ne(b).into_int()),
 
             // Less-than as 0/1.
             Expr::Binary {
                 op: BinOp::Lt,
                 lhs,
                 rhs,
-            } => eval_bin("Lt", *lhs, *rhs, state, |a, b, _| a.lt(b).as_int()),
+            } => eval_bin("Lt", *lhs, *rhs, state, |a, b, _| a.lt(b).into_int()),
 
             // Less-or-equal as 0/1.
             Expr::Binary {
                 op: BinOp::Le,
                 lhs,
                 rhs,
-            } => eval_bin("Le", *lhs, *rhs, state, |a, b, _| a.le(b).as_int()),
+            } => eval_bin("Le", *lhs, *rhs, state, |a, b, _| a.le(b).into_int()),
 
             // Greater-than as 0/1.
             Expr::Binary {
                 op: BinOp::Gt,
                 lhs,
                 rhs,
-            } => eval_bin("Gt", *lhs, *rhs, state, |a, b, _| a.gt(b).as_int()),
+            } => eval_bin("Gt", *lhs, *rhs, state, |a, b, _| a.gt(b).into_int()),
 
             // Greater-or-equal as 0/1.
             Expr::Binary {
                 op: BinOp::Ge,
                 lhs,
                 rhs,
-            } => eval_bin("Ge", *lhs, *rhs, state, |a, b, _| a.ge(b).as_int()),
+            } => eval_bin("Ge", *lhs, *rhs, state, |a, b, _| a.ge(b).into_int()),
 
             // Logical AND (&&) as 0/1 using non-zero test.
             Expr::Binary {
@@ -1414,7 +1403,7 @@ impl Expr {
             } => eval_bin("And", *lhs, *rhs, state, |a, b, _| {
                 let c1 = a.ne(SymExpr::Int(0));
                 let c2 = b.ne(SymExpr::Int(0));
-                BoolExpr::and(vec![c1, c2]).as_int()
+                BoolExpr::and(vec![c1, c2]).into_int()
             }),
 
             // Logical OR (||) as 0/1 using non-zero test.
@@ -1425,7 +1414,7 @@ impl Expr {
             } => eval_bin("Or", *lhs, *rhs, state, |a, b, _| {
                 let c1 = a.ne(SymExpr::Int(0));
                 let c2 = b.ne(SymExpr::Int(0));
-                BoolExpr::or(vec![c1, c2]).as_int()
+                BoolExpr::or(vec![c1, c2]).into_int()
             }),
 
             Expr::Call(callee, args) => {
@@ -1615,9 +1604,9 @@ fn try_eval_builtin_call(
     args: Vec<Expr>,
 ) -> Option<Vector<(SymExpr, SymState)>> {
     // Builtin scalar methods, e.g. `a.inverse()`.
-    if let Expr::Field { base, name, .. } = callee_expr {
-        if let Some(base_ty) = state.infer_expr_type(base.as_ref()) {
-            if let Ok(PathKind::Builtin) = state.ctx.classify_type(&base_ty) {
+    if let Expr::Field { base, name, .. } = callee_expr
+        && let Some(base_ty) = state.infer_expr_type(base.as_ref())
+            && let Ok(PathKind::Builtin) = state.ctx.classify_type(&base_ty) {
                 let (arg_vals, s_after_args) = eval_call_args(state, args);
                 return Some(eval_builtin_method_call(
                     s_after_args,
@@ -1627,12 +1616,10 @@ fn try_eval_builtin_call(
                     arg_vals,
                 ));
             }
-        }
-    }
 
     // Free builtin functions, e.g. `to_field(x)`, `to_u32(x)`, `to_word(x)`.
-    if let Expr::Path { segments, .. } = callee_expr {
-        if let Some(last) = segments.last() {
+    if let Expr::Path { segments, .. } = callee_expr
+        && let Some(last) = segments.last() {
             match last.as_str() {
                 "to_field" | "to_u32" | "to_word" | "to_bytes" | "and" | "or" | "xor"
                 | "extract_bit_u32" | "from_u32" => {
@@ -1647,7 +1634,6 @@ fn try_eval_builtin_call(
                 _ => {}
             }
         }
-    }
 
     None
 }
@@ -1759,11 +1745,10 @@ fn resolve_callee_expr(state: &SymState, callee: &Expr) -> (i64, Option<Receiver
         // Free function: f(...)
         Expr::Path { ref_id, segments } => {
             // If already resolved to a function id, use it.
-            if let Some(fid) = ref_id {
-                if state.ctx.fn_sig(*fid).is_some() {
+            if let Some(fid) = ref_id
+                && state.ctx.fn_sig(*fid).is_some() {
                     return (*fid, None);
                 }
-            }
 
             // Associated method: TypeName::method(...)
             if segments.len() >= 2 {
@@ -1809,16 +1794,14 @@ fn resolve_callee_expr(state: &SymState, callee: &Expr) -> (i64, Option<Receiver
                 segments,
                 ref_id: Some(sid),
             } = base.as_ref()
-            {
-                if let Some(last) = segments.last() {
-                    if let Some(struct_id) = state.ctx.struct_id_by_name(last) {
-                        if struct_id == *sid {
+                && let Some(last) = segments.last()
+                    && let Some(struct_id) = state.ctx.struct_id_by_name(last)
+                        && struct_id == *sid {
                             // Prefer an already resolved function id.
-                            if let Some(fid) = ref_id {
-                                if state.ctx.fn_sig(*fid).is_some() {
+                            if let Some(fid) = ref_id
+                                && state.ctx.fn_sig(*fid).is_some() {
                                     return (*fid, None);
                                 }
-                            }
 
                             let members =
                                 state.ctx.struct_members(struct_id).unwrap_or_else(|| {
@@ -1838,9 +1821,6 @@ fn resolve_callee_expr(state: &SymState, callee: &Expr) -> (i64, Option<Receiver
 
                             return (fid, None);
                         }
-                    }
-                }
-            }
 
             // Instance method: place.method(...)
             let base_ty = state
@@ -1872,11 +1852,10 @@ fn resolve_callee_expr(state: &SymState, callee: &Expr) -> (i64, Option<Receiver
             let receiver_place = build_receiver_place(state, base.as_ref());
 
             // Use pre-resolved function id if available.
-            if let Some(fid) = ref_id {
-                if state.ctx.fn_sig(*fid).is_some() {
+            if let Some(fid) = ref_id
+                && state.ctx.fn_sig(*fid).is_some() {
                     return (*fid, Some(receiver_place));
                 }
-            }
 
             // Fallback to member lookup by name.
             let members = state.ctx.struct_members(struct_id).unwrap_or_else(|| {
@@ -2009,14 +1988,13 @@ fn load_receiver_node(store: &Store, place: &ReceiverPlace) -> StoreNode {
                 node = child.clone();
             }
             (ReceiverStep::Index(i), StoreNode::Array { len, elems }) => {
-                if let Some(l) = len {
-                    if *i >= *l {
+                if let Some(l) = len
+                    && *i >= *l {
                         panic!(
                             "receiver array index {} out of bounds (len = {}) while loading",
                             i, l
                         );
                     }
-                }
                 let child = elems.get(i).unwrap_or_else(|| {
                     panic!(
                         "receiver array element {} uninitialized while loading receiver",
@@ -2128,10 +2106,10 @@ fn eval_builtin_free_fn_call(
                 SolverKind::Cvc5Ff => {
                     // Only allow u8 / bool / field here.
                     let allowed = if let Some(src_ty) = src_ty_opt.clone() {
-                        match state.type_map(&src_ty) {
-                            Ok(SymType::Uint(8)) | Ok(SymType::Bool) | Ok(SymType::F) => true,
-                            _ => false,
-                        }
+                        matches!(
+                            state.type_map(&src_ty),
+                            Ok(SymType::Uint(8)) | Ok(SymType::Bool) | Ok(SymType::F)
+                        )
                     } else {
                         false
                     };
@@ -2145,7 +2123,7 @@ fn eval_builtin_free_fn_call(
                     }
 
                     // Transparent cast: keep the original value.
-                    return Vector::unit((src_val, state));
+                    Vector::unit((src_val, state))
                 }
 
                 // For non-cvc5_ff backends, keep the old encoding.
@@ -2153,7 +2131,7 @@ fn eval_builtin_free_fn_call(
                     let res = state.fresh_sym("to_u32", SymType::Uint(32));
                     let eq = res.clone().eq_to(src_val);
                     state = state.with_pc(eq);
-                    return Vector::unit((res, state));
+                    Vector::unit((res, state))
                 }
             }
         }
@@ -2207,7 +2185,7 @@ fn eval_builtin_free_fn_call(
                     other
                 ),
             };
-            if idx_const < 0 || idx_const >= 32 {
+            if !(0..32).contains(&idx_const) {
                 panic!(
                     "`extract_bit_u32` index must be in [0,32), got {} for expr {:?}",
                     idx_const, idx_expr
@@ -2296,13 +2274,11 @@ fn eval_builtin_free_fn_call(
                 _ => None,
             };
 
-            if let Some(vid) = vid_opt {
-                if let Some(StoreNode::Scalar(val)) = state.store.get(vid) {
-                    if val.word.is_some() {
+            if let Some(vid) = vid_opt
+                && let Some(StoreNode::Scalar(val)) = state.store.get(vid)
+                    && val.word.is_some() {
                         return Vector::unit((val.surface.clone(), state));
                     }
-                }
-            }
 
             let (packed, mut state) =
                 state.pack_scalar_with_symtype(src_val.clone(), &SymType::Uint(32), "to_word");

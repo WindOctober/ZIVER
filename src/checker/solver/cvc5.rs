@@ -7,9 +7,6 @@ use crate::checker::symbolic::expr::{BoolExpr, SymExpr, SymType};
 /// cvc5 backend using QF_FF for field constraints.
 pub struct Cvc5ffBackend {
     field_modulus: i128,
-    /// If enabled, allow encodings that can be semantically unsound due to wrap-around modulo p.
-    /// Intended for debugging / formula export only.
-    relaxed: bool,
     vars: HashMap<String, SymType>,
     asserts: Vec<String>,
     range_fresh: usize,
@@ -18,10 +15,9 @@ pub struct Cvc5ffBackend {
 }
 
 impl Cvc5ffBackend {
-    pub fn new(field_modulus: i128, relaxed: bool) -> Self {
+    pub fn new(field_modulus: i128) -> Self {
         Self {
             field_modulus,
-            relaxed,
             vars: HashMap::new(),
             asserts: Vec::new(),
             range_fresh: 0,
@@ -44,15 +40,17 @@ impl Cvc5ffBackend {
     fn ensure_var(&mut self, name: &str, sort: &SymType) -> Result<(), String> {
         if let Some(prev) = self.vars.get(name) {
             // Permit numeric sorts to cohabit the field sort; Bool stays strict.
-            let compatible = match (prev, sort) {
-                (SymType::Bool, SymType::Bool) => true,
-                (SymType::F, SymType::F)
+            let compatible = matches!(
+                (prev, sort),
+                (SymType::Bool, SymType::Bool)
+                | (SymType::F, SymType::F)
                 | (SymType::F, SymType::Uint(_))
-                | (SymType::F, SymType::Int(_)) => true,
-                (SymType::Uint(_), SymType::F) | (SymType::Int(_), SymType::F) => true,
-                (SymType::Uint(_), SymType::Uint(_)) | (SymType::Int(_), SymType::Int(_)) => true,
-                _ => false,
-            };
+                | (SymType::F, SymType::Int(_))
+                | (SymType::Uint(_), SymType::F)
+                | (SymType::Int(_), SymType::F)
+                | (SymType::Uint(_), SymType::Uint(_))
+                | (SymType::Int(_), SymType::Int(_))
+            );
 
             if !compatible {
                 return Err(format!(
@@ -140,11 +138,10 @@ impl Cvc5ffBackend {
             }
 
             SymExpr::Mod(a, m) => {
-                if let SymExpr::Int(k) = &**m {
-                    if *k == self.field_modulus {
+                if let SymExpr::Int(k) = &**m
+                    && *k == self.field_modulus {
                         return self.encode_term(a);
                     }
-                }
                 Err("cvc5-ff: SymExpr::Mod only supports `mod FIELD_MODULUS`".to_string())
             }
 
@@ -166,10 +163,10 @@ impl Cvc5ffBackend {
         value: &SymExpr,
         bits: usize,
     ) -> Result<String, String> {
-        let max_bits = if self.relaxed { 64 } else { 24 };
+        let max_bits = 24;
         if bits == 0 || bits > max_bits {
             return Err(format!(
-                "cvc5-ff: byte decomposition only supports 1..{} bits (set --ff-relax to allow wider encodings)",
+                "cvc5-ff: byte decomposition only supports 1..{} bits",
                 max_bits
             ));
         }
@@ -177,7 +174,7 @@ impl Cvc5ffBackend {
         let target = self.encode_term(value)?;
         self.range_hints.insert(target.clone(), bits);
         let mut remaining = bits;
-        let byte_count = (bits + 7) / 8;
+        let byte_count = bits.div_ceil(8);
         let range_id = self.range_fresh;
         self.range_fresh += 1;
 
@@ -255,11 +252,10 @@ impl Cvc5ffBackend {
         rhs: &SymExpr,
     ) -> Option<Result<String, String>> {
         fn as_const(e: &SymExpr) -> Option<i128> {
-            if let SymExpr::Int(k) = e {
-                if *k >= 0 {
+            if let SymExpr::Int(k) = e
+                && *k >= 0 {
                     return Some(*k);
                 }
-            }
             None
         }
 
@@ -312,11 +308,10 @@ impl Cvc5ffBackend {
         rhs: &SymExpr,
     ) -> Option<Result<String, String>> {
         fn as_const(e: &SymExpr) -> Option<i128> {
-            if let SymExpr::Int(k) = e {
-                if *k >= 0 {
+            if let SymExpr::Int(k) = e
+                && *k >= 0 {
                     return Some(*k);
                 }
-            }
             None
         }
 
@@ -355,7 +350,7 @@ impl Cvc5ffBackend {
         // Helper: build offset encoding val = k + c, with 1 <= c <= 2^bits-1 (or 0.. when op is le).
         let encode_offset = |backend: &mut Cvc5ffBackend, start: i128, bits: usize| {
             // start is k (for ge/gt) or 0 (for le), bits bounds the offset.
-            let c_bits = bits.min(24).max(1);
+            let c_bits = bits.clamp(1, 24);
             let offset = SymExpr::Sub(Box::new(val.clone()), Box::new(SymExpr::Int(start)));
             backend.encode_range_byte_decomposition(&offset, c_bits)
         };
@@ -525,9 +520,9 @@ impl Cvc5ffBackend {
                 // For semantic soundness, we must avoid wrap-around modulo p. If 2^bits-1 >= p,
                 // the decomposition constrains an integer-like value but equality is interpreted
                 // modulo p, so the intended range semantics are not preserved.
-                if !self.relaxed && expected_max >= self.field_modulus {
+                if expected_max >= self.field_modulus {
                     return Err(format!(
-                        "cvc5-ff: cannot soundly encode {}-bit range under modulus p={} (max={} >= p); use z3_nia or set --ff-relax to export a relaxed formula",
+                        "cvc5-ff: cannot soundly encode {}-bit range under modulus p={} (max={} >= p); use z3_nia",
                         bw, self.field_modulus, expected_max
                     ));
                 }

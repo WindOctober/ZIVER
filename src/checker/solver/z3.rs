@@ -33,16 +33,14 @@ impl Z3NiaBackend {
 
     fn int_var(&mut self, name: &str, sort: Option<&SymType>) -> Int {
         if let Some(v) = self.int_vars.get(name) {
-            if let Some(s) = sort {
-                if let Some(prev) = self.var_sorts.get(name) {
-                    if prev != s {
+            if let Some(s) = sort
+                && let Some(prev) = self.var_sorts.get(name)
+                    && prev != s {
                         panic!(
                             "Z3: inconsistent sort for `{}`: prev = {:?}, new = {:?}",
                             name, prev, s
                         );
                     }
-                }
-            }
             return v.clone();
         }
 
@@ -108,13 +106,12 @@ impl Z3NiaBackend {
         let Some((lo, hi_opt)) = merged else { return };
 
         if let Ok(lo_i64) = i64::try_from(lo) {
-            self.solver.assert(&v.ge(&Int::from_i64(lo_i64)));
+            self.solver.assert(v.ge(Int::from_i64(lo_i64)));
         }
-        if let Some(hi) = hi_opt {
-            if let Ok(hi_i64) = i64::try_from(hi) {
-                self.solver.assert(&v.le(&Int::from_i64(hi_i64)));
+        if let Some(hi) = hi_opt
+            && let Ok(hi_i64) = i64::try_from(hi) {
+                self.solver.assert(v.le(Int::from_i64(hi_i64)));
             }
-        }
     }
 
     fn maybe_record_range_hint(&mut self, e: &SymExpr, min: i128, max: i128) {
@@ -219,12 +216,12 @@ impl Z3NiaBackend {
                 Bool::or(&parts)
             }
 
-            BoolExpr::Eq(a, b) => self.encode_int(a).eq(&self.encode_int(b)),
-            BoolExpr::Ne(a, b) => self.encode_int(a).ne(&self.encode_int(b)),
-            BoolExpr::Le(a, b) => self.encode_int(a).le(&self.encode_int(b)),
-            BoolExpr::Lt(a, b) => self.encode_int(a).lt(&self.encode_int(b)),
-            BoolExpr::Ge(a, b) => self.encode_int(a).ge(&self.encode_int(b)),
-            BoolExpr::Gt(a, b) => self.encode_int(a).gt(&self.encode_int(b)),
+            BoolExpr::Eq(a, b) => self.encode_int(a).eq(self.encode_int(b)),
+            BoolExpr::Ne(a, b) => self.encode_int(a).ne(self.encode_int(b)),
+            BoolExpr::Le(a, b) => self.encode_int(a).le(self.encode_int(b)),
+            BoolExpr::Lt(a, b) => self.encode_int(a).lt(self.encode_int(b)),
+            BoolExpr::Ge(a, b) => self.encode_int(a).ge(self.encode_int(b)),
+            BoolExpr::Gt(a, b) => self.encode_int(a).gt(self.encode_int(b)),
             BoolExpr::Range {
                 value, min, max, ..
             } => self.encode_range(value, *min, *max),
@@ -258,11 +255,10 @@ impl Z3NiaBackend {
         }
         match solver.check() {
             SatResult::Sat => {
-                if trace {
-                    if let Some(model) = solver.get_model() {
+                if trace
+                    && let Some(model) = solver.get_model() {
                         eprintln!("CZC_TRACE: Z3 SAT model:\n{model}");
                     }
-                }
                 Ok(true)
             }
             SatResult::Unsat => Ok(false),
@@ -278,16 +274,14 @@ impl Z3NiaBackend {
                 self.maybe_record_range_hint(value, *min, *max);
             }
             BoolExpr::Eq(a, b) => {
-                if let SymExpr::Int(k) = b {
-                    if let SymExpr::Var(name, _) = a {
+                if let SymExpr::Int(k) = b
+                    && let SymExpr::Var(name, _) = a {
                         self.record_range_hint(name, *k, *k);
                     }
-                }
-                if let SymExpr::Int(k) = a {
-                    if let SymExpr::Var(name, _) = b {
+                if let SymExpr::Int(k) = a
+                    && let SymExpr::Var(name, _) = b {
                         self.record_range_hint(name, *k, *k);
                     }
-                }
             }
             BoolExpr::Not(inner) => self.preload_ranges(inner),
             BoolExpr::And(xs) => {

@@ -501,13 +501,12 @@ fn parse_call_stmt(call: Pair<Rule>) -> Result<Stmt> {
     // call_tail := "(" arg_list? ")"
     if let Some(tail) = it.next() {
         if tail.as_rule() == Rule::call_tail {
-            if let Some(maybe_args) = tail.into_inner().next() {
-                if maybe_args.as_rule() == Rule::arg_list {
+            if let Some(maybe_args) = tail.into_inner().next()
+                && maybe_args.as_rule() == Rule::arg_list {
                     for e in maybe_args.into_inner() {
                         args.push(parse_expr(e)?);
                     }
                 }
-            }
         } else {
             return Err(anyhow!("expected call_tail"));
         }

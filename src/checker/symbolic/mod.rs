@@ -28,27 +28,22 @@ pub fn eval_index_const_or_err(ctx: &Context, store: Option<&Store>, e: &Expr) -
         // then fall back to compile-time consts.
         Expr::Path { ref_id, segments } => {
             // Runtime resolution via store.
-            if let Some(st) = store {
-                if let Some(node) = st.query_scalar(&Expr::Path {
+            if let Some(st) = store
+                && let Some(node) = st.query_scalar(&Expr::Path {
                     ref_id: *ref_id,
                     segments: segments.clone(),
-                }) {
-                    if let SymExpr::Int(k) = node.surface {
-                        if k >= 0 && (k as u128) <= (usize::MAX as u128) {
+                })
+                    && let SymExpr::Int(k) = node.surface
+                        && k >= 0 && (k as u128) <= (usize::MAX as u128) {
                             return Some(k as usize);
                         }
-                    }
-                }
-            }
 
             // Compile-time const resolution via `Context.const_int`.
-            if let Some(cid) = *ref_id {
-                if let Some(k) = ctx.const_int(cid) {
-                    if k <= usize::MAX as u64 {
+            if let Some(cid) = *ref_id
+                && let Some(k) = ctx.const_int(cid)
+                    && k <= usize::MAX as u64 {
                         return Some(k as usize);
                     }
-                }
-            }
             None
         }
 

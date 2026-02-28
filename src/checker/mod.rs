@@ -8,7 +8,7 @@ use std::{collections::HashMap, rc::Rc, time::Instant};
 use crate::{
     ast::{Expr, File, Func, IOType, Item, Type},
     checker::{
-        solver::{SmtBackend, backend_from_config, check_with_solver},
+        solver::{backend_from_config, check_with_solver},
         symbolic::{
             context::{Context, PathKind},
             execute::SymbolicExecutor,
@@ -22,16 +22,16 @@ use crate::{
 /// Build a map from field id to IOType for the given struct id.
 fn build_field_roles(file: &File, struct_id: i64) -> Result<HashMap<i64, IOType>, String> {
     for item in &file.items {
-        if let Item::Struct { id, fields, .. } = item {
-            if id.map_or(false, |sid| sid == struct_id) {
-                let mut map = HashMap::new();
-                for f in fields {
-                    let fid =
-                        f.id.ok_or_else(|| "field id must be assigned during resolve".to_string())?;
-                    map.insert(fid, f.io.clone());
-                }
-                return Ok(map);
+        if let Item::Struct { id, fields, .. } = item
+            && id.is_some_and(|sid| sid == struct_id)
+        {
+            let mut map = HashMap::new();
+            for f in fields {
+                let fid =
+                    f.id.ok_or_else(|| "field id must be assigned during resolve".to_string())?;
+                map.insert(fid, f.io.clone());
             }
+            return Ok(map);
         }
     }
     Err(format!(
@@ -100,11 +100,11 @@ impl<'a> QueryCheck<'a> {
         k: usize,
         lhs_final: &SymState,
         rhs_final: &SymState,
-        li: usize,
-        rj: usize,
+        path_pair: (usize, usize),
         input_pairs: &mut Vec<(SymExpr, SymExpr)>,
         output_pairs: &mut Vec<(SymExpr, SymExpr)>,
     ) -> Result<(), String> {
+        let (li, rj) = path_pair;
         let lhs_path = &self.lhs_paths[k + 1];
         let rhs_path = &self.rhs_paths[k + 1];
         let lhs_expr = &self.lhs_roots[k];
@@ -121,8 +121,8 @@ impl<'a> QueryCheck<'a> {
             .ok_or_else(|| format!("failed to infer type for RHS root `{:?}`", rhs_path))?;
 
         // Struct roots (e.g. `self`, `cols`) are handled by field-level IO roles.
-        if let (Type::Path { .. }, Type::Path { .. }) = (&lhs_ty, &rhs_ty) {
-            if let (Ok(PathKind::Struct(lsid)), Ok(PathKind::Struct(rsid))) = (
+        if let (Type::Path { .. }, Type::Path { .. }) = (&lhs_ty, &rhs_ty)
+            && let (Ok(PathKind::Struct(lsid)), Ok(PathKind::Struct(rsid))) = (
                 self.ctx.classify_type(&lhs_ty),
                 self.ctx.classify_type(&rhs_ty),
             ) {
@@ -200,7 +200,6 @@ impl<'a> QueryCheck<'a> {
 
                 return Ok(());
             }
-        }
 
         // Non-struct roots (scalars, arrays, nested composites) use parameter-level IO roles.
         let io_lhs = self
@@ -320,7 +319,7 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Re
         // Execute LHS.
         let mut lhs_init = SymState::new(Rc::clone(&ctx));
 
-        lhs_init.init_params_for_func(&lhs_func, self_struct_id);
+        lhs_init.init_params_for_func(lhs_func, self_struct_id);
 
         let lhs_exec_start = Instant::now();
         let lhs_terms = lhs_func.clone().execute(lhs_init);
@@ -340,7 +339,7 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Re
             .unwrap_or(0);
 
         let mut rhs_init = SymState::new(Rc::clone(&ctx)).with_fresh_start(max_fresh_lhs);
-        rhs_init.init_params_for_func(&rhs_func, self_struct_id);
+        rhs_init.init_params_for_func(rhs_func, self_struct_id);
 
         let rhs_exec_start = Instant::now();
         let rhs_terms = rhs_func.clone().execute(rhs_init);
@@ -376,8 +375,7 @@ pub fn check_equivalence(file: &File, ctx: Rc<Context>, config: SetConfig) -> Re
                         k,
                         lhs_final,
                         rhs_final,
-                        li,
-                        rj,
+                        (li, rj),
                         &mut input_pairs,
                         &mut output_pairs,
                     )?;

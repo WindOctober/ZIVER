@@ -552,8 +552,8 @@ impl SymState {
             return BoolSimplifyResult::from_constant(x <= y);
         }
 
-        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (&a, &b) {
-            if let Some((lo, hi)) = hints.get(name) {
+        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (&a, &b)
+            && let Some((lo, hi)) = hints.get(name) {
                 if *lo > *k {
                     return BoolSimplifyResult::from_constant(false);
                 }
@@ -561,10 +561,9 @@ impl SymState {
                     return BoolSimplifyResult::from_constant(true);
                 }
             }
-        }
 
-        if let (SymExpr::Int(k), SymExpr::Var(name, _)) = (&a, &b) {
-            if let Some((lo, hi)) = hints.get(name) {
+        if let (SymExpr::Int(k), SymExpr::Var(name, _)) = (&a, &b)
+            && let Some((lo, hi)) = hints.get(name) {
                 if *hi < *k {
                     return BoolSimplifyResult::from_constant(false);
                 }
@@ -572,7 +571,6 @@ impl SymState {
                     return BoolSimplifyResult::from_constant(true);
                 }
             }
-        }
 
         BoolSimplifyResult::from_expr(BoolExpr::Le(a, b))
     }
@@ -587,8 +585,8 @@ impl SymState {
             return BoolSimplifyResult::from_constant(x < y);
         }
 
-        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (&a, &b) {
-            if let Some((lo, hi)) = hints.get(name) {
+        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (&a, &b)
+            && let Some((lo, hi)) = hints.get(name) {
                 if *lo >= *k {
                     return BoolSimplifyResult::from_constant(false);
                 }
@@ -596,10 +594,9 @@ impl SymState {
                     return BoolSimplifyResult::from_constant(true);
                 }
             }
-        }
 
-        if let (SymExpr::Int(k), SymExpr::Var(name, _)) = (&a, &b) {
-            if let Some((lo, hi)) = hints.get(name) {
+        if let (SymExpr::Int(k), SymExpr::Var(name, _)) = (&a, &b)
+            && let Some((lo, hi)) = hints.get(name) {
                 if *hi <= *k {
                     return BoolSimplifyResult::from_constant(false);
                 }
@@ -607,7 +604,6 @@ impl SymState {
                     return BoolSimplifyResult::from_constant(true);
                 }
             }
-        }
 
         BoolSimplifyResult::from_expr(BoolExpr::Lt(a, b))
     }
@@ -622,8 +618,8 @@ impl SymState {
             return BoolSimplifyResult::from_constant(x >= y);
         }
 
-        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (&a, &b) {
-            if let Some((lo, hi)) = hints.get(name) {
+        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (&a, &b)
+            && let Some((lo, hi)) = hints.get(name) {
                 if *hi < *k {
                     return BoolSimplifyResult::from_constant(false);
                 }
@@ -631,10 +627,9 @@ impl SymState {
                     return BoolSimplifyResult::from_constant(true);
                 }
             }
-        }
 
-        if let (SymExpr::Int(k), SymExpr::Var(name, _)) = (&a, &b) {
-            if let Some((lo, hi)) = hints.get(name) {
+        if let (SymExpr::Int(k), SymExpr::Var(name, _)) = (&a, &b)
+            && let Some((lo, hi)) = hints.get(name) {
                 if *lo > *k {
                     return BoolSimplifyResult::from_constant(false);
                 }
@@ -642,7 +637,6 @@ impl SymState {
                     return BoolSimplifyResult::from_constant(true);
                 }
             }
-        }
 
         BoolSimplifyResult::from_expr(BoolExpr::Ge(a, b))
     }
@@ -657,8 +651,8 @@ impl SymState {
             return BoolSimplifyResult::from_constant(x > y);
         }
 
-        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (&a, &b) {
-            if let Some((lo, hi)) = hints.get(name) {
+        if let (SymExpr::Var(name, _), SymExpr::Int(k)) = (&a, &b)
+            && let Some((lo, hi)) = hints.get(name) {
                 if *hi <= *k {
                     return BoolSimplifyResult::from_constant(false);
                 }
@@ -666,10 +660,9 @@ impl SymState {
                     return BoolSimplifyResult::from_constant(true);
                 }
             }
-        }
 
-        if let (SymExpr::Int(k), SymExpr::Var(name, _)) = (&a, &b) {
-            if let Some((lo, hi)) = hints.get(name) {
+        if let (SymExpr::Int(k), SymExpr::Var(name, _)) = (&a, &b)
+            && let Some((lo, hi)) = hints.get(name) {
                 if *lo >= *k {
                     return BoolSimplifyResult::from_constant(false);
                 }
@@ -677,7 +670,6 @@ impl SymState {
                     return BoolSimplifyResult::from_constant(true);
                 }
             }
-        }
 
         BoolSimplifyResult::from_expr(BoolExpr::Gt(a, b))
     }
@@ -1017,7 +1009,7 @@ impl SymState {
         ty: &Type,
         hint: &str,
     ) -> (SymValue, SymState) {
-        let sty = self.type_map(ty).unwrap_or_else(|_| SymType::F);
+        let sty = self.type_map(ty).unwrap_or(SymType::F);
         self.pack_scalar_with_symtype(value, &sty, hint)
     }
 
@@ -1155,11 +1147,10 @@ impl SymState {
                 if min > max {
                     return true;
                 }
-                if let SymExpr::Var(name, _) = value {
-                    if let Some((lo, hi)) = self.range_hints.get(name) {
+                if let SymExpr::Var(name, _) = value
+                    && let Some((lo, hi)) = self.range_hints.get(name) {
                         return *max < *lo || *min > *hi;
                     }
-                }
                 false
             }
             BoolExpr::Eq(a, b) => match (a, b) {
@@ -1192,13 +1183,11 @@ impl SymState {
     /// then falls back to static context-based inference.
     pub fn infer_expr_type(&self, e: &Expr) -> Option<Type> {
         // Prefer dynamic sort from a materialized scalar node.
-        if let Some(node) = self.query_expr_node(e) {
-            if let StoreNode::Scalar(se) = node {
-                if let Some(sty) = Self::symexpr_sort(&se.surface) {
+        if let Some(node) = self.query_expr_node(e)
+            && let StoreNode::Scalar(se) = node
+                && let Some(sty) = Self::symexpr_sort(&se.surface) {
                     return Some(self.ctx.sym_type_to_builtin_type(&sty));
                 }
-            }
-        }
 
         // Fallback to static inference on ids and builtin types.
         self.ctx.infer_expr_type_static(e)
@@ -1386,20 +1375,18 @@ impl SymState {
         for p in &func.params {
             match p {
                 Param::SelfParam { id } if name == "self" => {
-                    if let Some(vid) = *id {
-                        if let Some(node) = self.store.get(vid) {
+                    if let Some(vid) = *id
+                        && let Some(node) = self.store.get(vid) {
                             return Some(node);
                         }
-                    }
                 }
                 Param::Typed {
                     id, name: pname, ..
                 } if pname == name => {
-                    if let Some(vid) = *id {
-                        if let Some(node) = self.store.get(vid) {
+                    if let Some(vid) = *id
+                        && let Some(node) = self.store.get(vid) {
                             return Some(node);
                         }
-                    }
                 }
                 _ => {}
             }
