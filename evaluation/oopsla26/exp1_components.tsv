@@ -1,0 +1,8 @@
+component	pattern	solver	paper_time_s	paper_result	case_key	path
+Add	G+L	z3_nia	11.320	✓	Add	benchmark/Component/SP1/Add/add.cz
+Add4	G+L	z3_nia	5.958	✓	Add4	benchmark/Component/SP1/Add4/add4.cz
+And	G+L	z3_nia	0.035	✓	And	benchmark/Component/SP1/And/and.cz
+IsEqualWordOperation	G	cvc5_ff	0.299	✓	IsEqualWord	benchmark/Component/SP1/IsEqualWordOperation/is_equal.cz
+IsZeroOperation	G	cvc5_ff	0.011	✗	IsZero	benchmark/Component/SP1/IsZeroOperation/is_zero.cz
+IsZeroWordOperation	G	cvc5_ff	0.070	✓	IsZeroWord	benchmark/Component/SP1/IsZeroWordOperation/is_zero_word.cz
+MapRead	G+L+P	z3_nia	0.012	✓	MapRead	benchmark/Component/SP1/MapRead/map_read.cz

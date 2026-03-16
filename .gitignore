@@ -1,4 +1,5 @@
 /target
 /benchmark/Unprocessed
+/results
 *.txt
 *.smt2
