@@ -7,9 +7,6 @@ The paper has two main experiments:
 1. `Table 1`: 7 representative SP1 component benchmarks.
 2. `Table 2`: 25 audit-driven SP1 findings, with 16 reproduced and 9 unsupported under the current abstraction.
 
-The repository now exposes those experiments directly through a small set of scripts instead of the earlier ad hoc runners.
-Inside `benchmark/`, only the files needed by `exp1` and `exp2` are retained.
-
 ## Layout
 
 - `evaluation/oopsla26/exp1_components.tsv`
@@ -130,6 +127,6 @@ At the end it also summarizes:
 
 ## Notes
 
-- `Table 2` is intentionally data-driven through the manifest so the paper mapping stays explicit.
-- The surviving `benchmark/Audit/SP1/*.cz` files are already the final paper-facing versions; for several cases they were taken from the earlier `rich` or `unrolled` variants to match the published timings.
+- `Table 2` is driven by the manifest in `evaluation/oopsla26/exp2_audits.tsv`.
+- `benchmark/Audit/SP1/*.cz` contains the benchmark files used by the paper-facing evaluation workflow.
 - Wall times are local measurements and should be treated as reproduction numbers, not as exact copies of the paper's hardware-specific timings.
