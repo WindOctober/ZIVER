@@ -1,26 +1,36 @@
-// Veridise V-SP1-VUL-002: challenger constructor zeroes counters but not the sponge state.
+// Richer V002: keep more constructor outputs while preserving the missing
+// sponge-state initialization bug.
 
 const usize STATE_WIDTH = 3;
 
-Struct SpongeStateInitV002 {
+Struct SpongeStateInitV002Rich {
     output sponge_state: [field; STATE_WIDTH],
     output nb_inputs: field,
     output nb_outputs: field,
+    output rate_cursor: u8,
+    output is_absorbing: field,
+    output is_squeezing: field,
 }
 
-Component SpongeStateInitV002 {
+Component SpongeStateInitV002Rich {
     Computation populate(self) {
         self.nb_inputs = 0;
         self.nb_outputs = 0;
+        self.rate_cursor = 0;
+        self.is_absorbing = 0;
+        self.is_squeezing = 0;
 
         for i in 0..STATE_WIDTH {
             self.sponge_state[i] = 0;
         }
     }
 
-    Constraint eval(cols: SpongeStateInitV002) {
+    Constraint eval(cols: SpongeStateInitV002Rich) {
         assert_eq(cols.nb_inputs, 0);
         assert_eq(cols.nb_outputs, 0);
+        assert_eq(cols.rate_cursor, 0);
+        assert_eq(cols.is_absorbing, 0);
+        assert_eq(cols.is_squeezing, 0);
 
         // Bug: missing zero constraints on `sponge_state`.
     }

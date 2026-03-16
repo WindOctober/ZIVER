@@ -38,14 +38,14 @@ ensure_binary
 MANIFEST="$MANIFEST_DIR/exp1_components.tsv"
 OUT_TSV="$RESULTS_DIR/exp1_components.tsv"
 
-printf "component\tpattern\tsolver\tpaper_result\tpaper_time_s\tcurrent_cli\tcurrent_time_s\tpaper_match\tcase\n" >"$OUT_TSV"
+printf "component\tpattern\tsolver\tpaper_result\tpaper_time_s\tcurrent_cli\tcurrent_time_s\ttime_delta_s\ttime_match\tpaper_match\tcase\n" >"$OUT_TSV"
 
 while IFS=$'\t' read -r component pattern solver paper_time_s paper_result case_key rel_path; do
   if [[ "$component" == "component" ]]; then
     continue
   fi
 
-  IFS=$'\t' read -r cli_status reason avg_s < <(run_case_average "$rel_path" "$solver" "$ITERATIONS")
+  IFS=$'\t' read -r cli_status reason avg_s < <(run_case_average "$rel_path" "$solver" "$ITERATIONS" "-")
 
   if [[ "$paper_result" == "✓" ]]; then
     expected_cli="PASS"
@@ -59,9 +59,12 @@ while IFS=$'\t' read -r component pattern solver paper_time_s paper_result case_
     paper_match="no"
   fi
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s (%s)\t%s\t%s\t%s\n" \
+  delta_s=$(time_delta_s "$avg_s" "$paper_time_s")
+  time_match=$(time_match_3dp "$avg_s" "$paper_time_s")
+
+  printf "%s\t%s\t%s\t%s\t%s\t%s (%s)\t%s\t%s\t%s\t%s\t%s\n" \
     "$component" "$pattern" "$solver" "$paper_result" "$paper_time_s" \
-    "$cli_status" "$reason" "$avg_s" "$paper_match" "$case_key" >>"$OUT_TSV"
+    "$cli_status" "$reason" "$avg_s" "$delta_s" "$time_match" "$paper_match" "$case_key" >>"$OUT_TSV"
 done <"$MANIFEST"
 
 echo "Experiment 1: Table 1 component benchmarks"

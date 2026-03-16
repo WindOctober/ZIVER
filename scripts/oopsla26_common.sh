@@ -93,6 +93,7 @@ run_case_average() {
   local rel_path="$1"
   local solver="$2"
   local iterations="$3"
+  local extra_arg="${4:--}"
   local total_ns=0
   local last_cli="ERROR"
   local last_reason="not run"
@@ -106,7 +107,13 @@ run_case_average() {
     : >"$out_file"
     : >"$err_file"
     start_ns=$(date +%s%N)
-    if "$BIN" "$rel_path" --solver "$solver" >"$out_file" 2>"$err_file"; then
+    if [[ "$extra_arg" == "-" ]]; then
+      if "$BIN" "$rel_path" --solver "$solver" >"$out_file" 2>"$err_file"; then
+        exit_code=0
+      else
+        exit_code=$?
+      fi
+    elif "$BIN" "$rel_path" --solver "$solver" "$extra_arg" >"$out_file" 2>"$err_file"; then
       exit_code=0
     else
       exit_code=$?
@@ -134,5 +141,33 @@ pretty_print_tsv() {
     column -t -s $'\t' "$path"
   else
     cat "$path"
+  fi
+}
+
+time_delta_s() {
+  local current_s="$1"
+  local paper_s="$2"
+
+  if [[ "$current_s" == "-" || "$paper_s" == "-" ]]; then
+    printf -- "-\n"
+    return 0
+  fi
+
+  awk -v current="$current_s" -v paper="$paper_s" 'BEGIN { printf "%+.3f", current - paper }'
+}
+
+time_match_3dp() {
+  local current_s="$1"
+  local paper_s="$2"
+
+  if [[ "$current_s" == "-" || "$paper_s" == "-" ]]; then
+    printf -- "-\n"
+    return 0
+  fi
+
+  if [[ "$current_s" == "$paper_s" ]]; then
+    printf "yes\n"
+  else
+    printf "no\n"
   fi
 }

@@ -1,29 +1,48 @@
-// Kalos #5: jump opcodes leave `a` underconstrained, and JALR constrains `next_fp`
-// against `a` instead of `c`. We model the JALR branch directly.
+// Richer K5: expose the jump multiplicity and keep the local JALR state update.
 
-Struct JumpOpcodeBindingK5 {
+Struct JumpOpcodeBindingK5Rich {
+    input is_jalr: Selector,
     input pc: u32,
     input b_value: u32,
     input c_value: u32,
-    output a_value: u32,
+    output jump_mult: field,
+    output link_value: u32,
     output next_fp: u32,
     output next_pc: u32,
 }
 
-Component JumpOpcodeBindingK5 {
+Component JumpOpcodeBindingK5Rich {
     Computation populate(self) {
-        self.a_value = self.pc + 1;
-        self.next_fp = self.c_value;
-        self.next_pc = self.b_value;
+        assert_bool(self.is_jalr);
+        self.jump_mult = self.is_jalr;
+
+        if (self.is_jalr == 1) {
+            self.link_value = self.pc + 1;
+            self.next_fp = self.c_value;
+            self.next_pc = self.b_value;
+        } else {
+            self.link_value = 0;
+            self.next_fp = 0;
+            self.next_pc = 0;
+        }
     }
 
-    Constraint eval(cols: JumpOpcodeBindingK5) {
-        assert_eq(cols.next_fp, cols.a_value);
-        assert_eq(cols.next_pc, cols.b_value);
+    Constraint eval(cols: JumpOpcodeBindingK5Rich) {
+        assert_bool(cols.is_jalr);
+        assert_eq(cols.jump_mult, cols.is_jalr);
+
+        if (cols.is_jalr == 1) {
+            assert_eq(cols.next_fp, cols.link_value);
+            assert_eq(cols.next_pc, cols.b_value);
+        } else {
+            assert_eq(cols.link_value, 0);
+            assert_eq(cols.next_fp, 0);
+            assert_eq(cols.next_pc, 0);
+        }
 
         // Bug:
-        // - missing binding from `a_value` to the saved `pc + 1`
-        // - JALR should constrain `next_fp = c_value`, not `a_value`
+        // - missing `link_value = pc + 1`
+        // - `next_fp` should equal `c_value`, not `link_value`
     }
 
     Query(populate, self; eval, cols)

@@ -8,13 +8,14 @@ The paper has two main experiments:
 2. `Table 2`: 25 audit-driven SP1 findings, with 16 reproduced and 9 unsupported under the current abstraction.
 
 The repository now exposes those experiments directly through a small set of scripts instead of the earlier ad hoc runners.
+Inside `benchmark/`, only the files needed by `exp1` and `exp2` are retained.
 
 ## Layout
 
 - `evaluation/oopsla26/exp1_components.tsv`
   - manifest for `Table 1`
 - `evaluation/oopsla26/exp2_audits.tsv`
-  - manifest for `Table 2`
+  - manifest for `Table 2`, including the paper-facing `rich` / `unrolled` variant chosen for each supported case
 - `scripts/oopsla26_setup.sh`
   - checks the local environment and builds `target/debug/certzero` if needed
 - `scripts/oopsla26_exp1.sh`
@@ -96,6 +97,8 @@ The script prints:
 - the paper result
 - the local CLI observation
 - the current average wall time
+- the wall-time delta against the paper
+- whether the local wall time matches the paper at `0.001s` precision
 - whether the local run matches the paper verdict
 
 ## Experiment 2
@@ -112,10 +115,13 @@ The script prints:
 
 - source audit and finding id
 - category `L`, `X`, or `S`
+- the paper-facing variant retained for that case
 - whether the case is currently modeled
 - the local CLI observation
 - whether the bug was reproduced
 - the local average wall time
+- the wall-time delta against the paper
+- whether the local wall time matches the paper at `0.001s` precision
 
 At the end it also summarizes:
 
@@ -126,6 +132,6 @@ At the end it also summarizes:
 
 ## Notes
 
-- The `benchmark/Audit/SP1/Rich` and `benchmark/Audit/SP1/Unrolled` cases remain in the tree as supplementary artifacts, but they are not part of the main OOPSLA `Evaluation` reproduction path.
 - `Table 2` is intentionally data-driven through the manifest so the paper mapping stays explicit.
+- The surviving `benchmark/Audit/SP1/*.cz` files are already the final paper-facing versions; for several cases they were taken from the earlier `rich` or `unrolled` variants to match the published timings.
 - Wall times are local measurements and should be treated as reproduction numbers, not as exact copies of the paper's hardware-specific timings.

@@ -1,36 +1,46 @@
-// A4: when `is_real = 0`, selectors should not trigger any interaction.
-// This version models the observable semantic effect: an unintended lookup on padding.
+// Richer A4: keep two local selectors and their lookup activation pattern.
 
-Struct PaddingLookupA4 {
+Struct PaddingLookupA4Rich {
     input is_real: Selector,
-    input memory_selector: Selector,
+    input is_memory: Selector,
+    input is_branch: Selector,
     input clk: field,
     input pc: field,
-    output witness: field,
+    output active_selector: field,
+    output fired_lookup: field,
 }
 
-Component PaddingLookupA4 {
+Component PaddingLookupA4Rich {
     Computation populate(self) {
         assert_bool(self.is_real);
-        assert_bool(self.memory_selector);
-        self.witness = self.memory_selector;
+        assert_bool(self.is_memory);
+        assert_bool(self.is_branch);
+        assert_zero(self.is_memory * self.is_branch);
 
-        if (self.is_real == 1) {
-            if (self.memory_selector == 1) {
-                lookup(SendInstruction, 0, self.clk, self.pc, self.memory_selector);
-            }
+        self.active_selector = self.is_memory + self.is_branch;
+        assert_bool(self.active_selector);
+        self.fired_lookup = self.is_real * self.active_selector;
+
+        if (self.fired_lookup == 1) {
+            lookup(SendInstruction, 0, self.clk, self.pc, self.active_selector);
         }
     }
 
-    Constraint eval(cols: PaddingLookupA4) {
+    Constraint eval(cols: PaddingLookupA4Rich) {
         assert_bool(cols.is_real);
-        assert_bool(cols.memory_selector);
-        assert_eq(cols.witness, cols.memory_selector);
+        assert_bool(cols.is_memory);
+        assert_bool(cols.is_branch);
+        assert_zero(cols.is_memory * cols.is_branch);
 
-        // Bug: selector can still fire a lookup even when is_real = 0.
-        if (cols.memory_selector == 1) {
-            lookup(SendInstruction, 0, cols.clk, cols.pc, cols.memory_selector);
+        assert_eq(cols.active_selector, cols.is_memory + cols.is_branch);
+        assert_bool(cols.active_selector);
+        assert_eq(cols.fired_lookup, cols.active_selector);
+
+        if (cols.fired_lookup == 1) {
+            lookup(SendInstruction, 0, cols.clk, cols.pc, cols.active_selector);
         }
+
+        // Bug: missing `is_real` gate on selector-driven lookups.
     }
 
     Query(populate, self; eval, cols)

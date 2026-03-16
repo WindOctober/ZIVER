@@ -1,32 +1,65 @@
-// Kalos #6: BNEINC only constrains limb 0 of the new `a` value.
+// Unrolled K6: two consecutive BNEINC-style updates on the `a` register.
+// We keep the local next-pc update and the full word state across both rows.
 
 const usize WORD_SIZE = 4;
 
-Struct BneincUpperLimbsK6 {
-    input prev_a: [u32; WORD_SIZE],
-    output a: [u32; WORD_SIZE],
+Struct BneincUpperLimbsK6Unrolled {
+    input is_bneinc0: Selector,
+    input is_bneinc1: Selector,
+    input prev_a0: [u32; WORD_SIZE],
+    input prev_pc0: u32,
+    output a0: [u32; WORD_SIZE],
+    output next_pc0: u32,
+    output prev_a1: [u32; WORD_SIZE],
+    output a1: [u32; WORD_SIZE],
+    output next_pc1: u32,
 }
 
-Component BneincUpperLimbsK6 {
+Component BneincUpperLimbsK6Unrolled {
     Computation populate(self) {
+        assert_bool(self.is_bneinc0);
+        assert_bool(self.is_bneinc1);
+
         for i in 0..WORD_SIZE {
-            assert_range(self.prev_a[i], u8);
+            assert_range(self.prev_a0[i], u8);
         }
 
-        self.a[0] = self.prev_a[0] + 1;
-        self.a[1] = self.prev_a[1];
-        self.a[2] = self.prev_a[2];
-        self.a[3] = self.prev_a[3];
+        self.a0[0] = self.prev_a0[0] + self.is_bneinc0;
+        self.a0[1] = self.prev_a0[1];
+        self.a0[2] = self.prev_a0[2];
+        self.a0[3] = self.prev_a0[3];
+        self.next_pc0 = self.prev_pc0 + self.is_bneinc0;
+
+        for i in 0..WORD_SIZE {
+            self.prev_a1[i] = self.a0[i];
+        }
+
+        self.a1[0] = self.prev_a1[0] + self.is_bneinc1;
+        self.a1[1] = self.prev_a1[1];
+        self.a1[2] = self.prev_a1[2];
+        self.a1[3] = self.prev_a1[3];
+        self.next_pc1 = self.next_pc0 + self.is_bneinc1;
     }
 
-    Constraint eval(cols: BneincUpperLimbsK6) {
+    Constraint eval(cols: BneincUpperLimbsK6Unrolled) {
+        assert_bool(cols.is_bneinc0);
+        assert_bool(cols.is_bneinc1);
+
         for i in 0..WORD_SIZE {
-            assert_range(cols.prev_a[i], u8);
+            assert_range(cols.prev_a0[i], u8);
         }
 
-        assert_eq(cols.a[0], cols.prev_a[0] + 1);
+        assert_eq(cols.a0[0], cols.prev_a0[0] + cols.is_bneinc0);
+        assert_eq(cols.next_pc0, cols.prev_pc0 + cols.is_bneinc0);
 
-        // Bug: missing `a[1..4] == prev_a[1..4]`.
+        for i in 0..WORD_SIZE {
+            assert_eq(cols.prev_a1[i], cols.a0[i]);
+        }
+
+        assert_eq(cols.a1[0], cols.prev_a1[0] + cols.is_bneinc1);
+        assert_eq(cols.next_pc1, cols.next_pc0 + cols.is_bneinc1);
+
+        // Bug: both BNEINC updates omit `a[1..4] = prev_a[1..4]`.
     }
 
     Query(populate, self; eval, cols)

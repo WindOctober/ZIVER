@@ -1,18 +1,20 @@
-// A12: reduced abstraction of "result not forced < modulus".
-// This keeps the same logical shape as the uint256 issue without a full 256-bit model.
+// Richer A12: keep byte-level bookkeeping for the reduced result.
 
 const u32 REDUCED_MODULUS = 40000;
 
-Struct ReducedModulusRangeA12 {
+Struct ReducedModulusRangeA12Rich {
     input a: u8,
     input b: u8,
     output carry: field,
     output result: u32,
+    output result_lo: u8,
+    output result_hi: u8,
 }
 
-Component ReducedModulusRangeA12 {
+Component ReducedModulusRangeA12Rich {
     Computation populate(self) {
         u32 raw = to_u32(self.a) * to_u32(self.b);
+
         if (raw < REDUCED_MODULUS) {
             self.carry = 0;
             self.result = raw;
@@ -20,15 +22,23 @@ Component ReducedModulusRangeA12 {
             self.carry = 1;
             self.result = raw - REDUCED_MODULUS;
         }
+
+        self.result_lo = to_bytes(self.result)[0];
+        self.result_hi = to_bytes(self.result)[1];
     }
 
-    Constraint eval(cols: ReducedModulusRangeA12) {
+    Constraint eval(cols: ReducedModulusRangeA12Rich) {
         assert_bool(cols.carry);
+        assert_range(cols.result_lo, u8);
+        assert_range(cols.result_hi, u8);
 
         u32 raw = to_u32(cols.a) * to_u32(cols.b);
         assert_eq(raw, cols.result + REDUCED_MODULUS * to_u32(cols.carry));
+        assert_eq(cols.result_lo, to_bytes(cols.result)[0]);
+        assert_eq(cols.result_hi, to_bytes(cols.result)[1]);
+        assert_eq(cols.result, to_u32(cols.result_lo) + 256 * to_u32(cols.result_hi));
 
-        // Bug: missing `cols.result < REDUCED_MODULUS`.
+        // Bug: missing `result < REDUCED_MODULUS`.
     }
 
     Query(populate, self; eval, cols)

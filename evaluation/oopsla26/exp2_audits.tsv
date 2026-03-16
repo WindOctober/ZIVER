@@ -1,26 +1,26 @@
-source	id	category	paper_result	paper_time_s	local_status	case_key	solver	path	finding
-sp1-v4	#4	L	✓	0.016	supported	A3	z3_nia	benchmark/Audit/SP1/A3_send_to_table_padding.cz	send_to_table may be nonzero in padding
-sp1-v4	#5	X	✗	-	unsupported	-	-	-	is_memory is underconstrained across routed permutations
-sp1-v4	#6	L	✓	0.092	supported	A2	z3_nia	benchmark/Audit/SP1/A2_next_pc_underconstrained_on_ecall.cz	next_pc is underconstrained on ECALL
-rkm0959	#11	L	✓	0.017	supported	RKM11	z3_nia	benchmark/Audit/SP1/RKM11_exp_reverse_bits_boundary.cz	Incorrect constraints in exp_reverse_bits
-kalos	#1	X	✗	-	unsupported	-	-	-	Poseidon2/external logic requires multi-cycle state and memory-write semantics
-kalos	#2	L	✓	0.014	supported	K2	z3_nia	benchmark/Audit/SP1/K2_recursion_is_real_not_boolean.cz	is_real is not constrained to be boolean in eval_memory_access
-kalos	#3	X	✗	-	unsupported	-	-	-	MemoryGlobalChip permits repeated initialization of the same address
-kalos	#4	L	✓	0.085	supported	K4	z3_nia	benchmark/Audit/SP1/K4_load_value_not_bound.cz	LOAD does not bind the loaded register value to the memory read
-kalos	#5	L	✓	0.018	supported	K5	z3_nia	benchmark/Audit/SP1/K5_jump_opcode_underconstrained.cz	Jump logic leaves op_a and fp underconstrained
-kalos	#6	L	✓	0.099	supported	K6	z3_nia	benchmark/Audit/SP1/K6_bneinc_upper_limbs.cz	BNEINC leaves the write-back value underconstrained
-kalos	#7	X	✓	0.012	supported	A4	z3_nia	benchmark/Audit/SP1/A4_padding_selector_leaks_lookup.cz	Padding-row selectors are not fully reset
-kalos	#8	S	✗	-	unsupported	-	-	-	Division admits arbitrary 0/0 behavior under the current semantic target
-kalos	#9	L	✓	0.099	supported	A5	z3_nia	benchmark/Audit/SP1/A5_read_only_selector_incomplete.cz	The read-only selector set is incomplete
-kalos	#10	X	✗	-	unsupported	-	-	-	The first row does not initialize clk/pc
-kalos	#11	X	✗	-	unsupported	-	-	-	MultiBuilder requires stacked-table boundary semantics
-kalos	#12	X	✗	-	unsupported	-	-	-	FriFoldChip requires cross-row closure over syscall and memory-access behavior
-cantina	3.1.1	X	✓	0.005	supported	A9	z3_nia	benchmark/Audit/SP1/A9_program_zero_row_receive.cz	ProgramChip can receive all-zero columns
-cantina	3.1.2	L	✓	25.058	supported	C312	z3_nia	benchmark/Audit/SP1/C312_syscall_arg_overflow.cz	Syscall arguments may overflow
-cantina	3.1.3	L	✓	3.439	supported	A10	z3_nia	benchmark/Audit/SP1/A10_memory_access_slice_overflow.cz	eval_memory_access_slice may overflow
-cantina	3.1.4	X	✗	-	unsupported	-	-	-	uint256 multiplication fails when x_ptr == y_ptr
-cantina	3.1.5	X	✓	0.035	supported	A11	z3_nia	benchmark/Audit/SP1/A11_unaligned_memory_access.cz	Unaligned memory access yields a permutation mismatch
-cantina	3.1.6	L	✓	2.258	supported	A12	z3_nia	benchmark/Audit/SP1/A12_reduced_modulus_result_range.cz	The uint256 precompile result is not reduced modulo the field
-code4rena	H-01	L	✓	0.152	supported	H01	z3_nia	benchmark/Audit/SP1/H01_missing_limb_recomposition.cz	Range checks fail to bind limbs to the recomposed value
-veridise	V-SP1-VUL-002	L	✓	0.016	supported	V002	z3_nia	benchmark/Audit/SP1/V002_sponge_state_not_zero.cz	The sponge state is not initialized to zero
-veridise	V-SP1-VUL-007	X	✗	-	unsupported	-	-	-	The gnark Poseidon hash is not reduced modulo the field
+source	id	category	paper_result	paper_time_s	paper_variant	extra_args	local_status	case_key	solver	path	finding
+sp1-v4	#4	L	✓	0.016	rich	-	supported	A3	z3_nia	benchmark/Audit/SP1/A3_send_to_table_padding.cz	send_to_table may be nonzero in padding
+sp1-v4	#5	X	✗	-	-	-	unsupported	-	-	-	is_memory is underconstrained across routed permutations
+sp1-v4	#6	L	✓	0.092	unrolled	-	supported	A2	z3_nia	benchmark/Audit/SP1/A2_next_pc_underconstrained_on_ecall.cz	next_pc is underconstrained on ECALL
+rkm0959	#11	L	✓	0.017	rich	-	supported	RKM11	z3_nia	benchmark/Audit/SP1/RKM11_exp_reverse_bits_boundary.cz	Incorrect constraints in exp_reverse_bits
+kalos	#1	X	✗	-	-	-	unsupported	-	-	-	Poseidon2/external logic requires multi-cycle state and memory-write semantics
+kalos	#2	L	✓	0.014	rich	-	supported	K2	z3_nia	benchmark/Audit/SP1/K2_recursion_is_real_not_boolean.cz	is_real is not constrained to be boolean in eval_memory_access
+kalos	#3	X	✗	-	-	-	unsupported	-	-	-	MemoryGlobalChip permits repeated initialization of the same address
+kalos	#4	L	✓	0.085	unrolled	-	supported	K4	z3_nia	benchmark/Audit/SP1/K4_load_value_not_bound.cz	LOAD does not bind the loaded register value to the memory read
+kalos	#5	L	✓	0.018	rich	-	supported	K5	z3_nia	benchmark/Audit/SP1/K5_jump_opcode_underconstrained.cz	Jump logic leaves op_a and fp underconstrained
+kalos	#6	L	✓	0.099	unrolled	--no-type-opt	supported	K6	z3_nia	benchmark/Audit/SP1/K6_bneinc_upper_limbs.cz	BNEINC leaves the write-back value underconstrained
+kalos	#7	X	✓	0.012	rich	-	supported	A4	z3_nia	benchmark/Audit/SP1/A4_padding_selector_leaks_lookup.cz	Padding-row selectors are not fully reset
+kalos	#8	S	✗	-	-	-	unsupported	-	-	-	Division admits arbitrary 0/0 behavior under the current semantic target
+kalos	#9	L	✓	0.099	unrolled	-	supported	A5	z3_nia	benchmark/Audit/SP1/A5_read_only_selector_incomplete.cz	The read-only selector set is incomplete
+kalos	#10	X	✗	-	-	-	unsupported	-	-	-	The first row does not initialize clk/pc
+kalos	#11	X	✗	-	-	-	unsupported	-	-	-	MultiBuilder requires stacked-table boundary semantics
+kalos	#12	X	✗	-	-	-	unsupported	-	-	-	FriFoldChip requires cross-row closure over syscall and memory-access behavior
+cantina	3.1.1	X	✓	0.005	rich	-	supported	A9	z3_nia	benchmark/Audit/SP1/A9_program_zero_row_receive.cz	ProgramChip can receive all-zero columns
+cantina	3.1.2	L	✓	25.058	rich	-	supported	C312	z3_nia	benchmark/Audit/SP1/C312_syscall_arg_overflow.cz	Syscall arguments may overflow
+cantina	3.1.3	L	✓	3.439	unrolled	--no-type-opt	supported	A10	z3_nia	benchmark/Audit/SP1/A10_memory_access_slice_overflow.cz	eval_memory_access_slice may overflow
+cantina	3.1.4	X	✗	-	-	-	unsupported	-	-	-	uint256 multiplication fails when x_ptr == y_ptr
+cantina	3.1.5	X	✓	0.035	rich	-	supported	A11	z3_nia	benchmark/Audit/SP1/A11_unaligned_memory_access.cz	Unaligned memory access yields a permutation mismatch
+cantina	3.1.6	L	✓	2.258	rich	-	supported	A12	z3_nia	benchmark/Audit/SP1/A12_reduced_modulus_result_range.cz	The uint256 precompile result is not reduced modulo the field
+code4rena	H-01	L	✓	0.152	unrolled	-	supported	H01	z3_nia	benchmark/Audit/SP1/H01_missing_limb_recomposition.cz	Range checks fail to bind limbs to the recomposed value
+veridise	V-SP1-VUL-002	L	✓	0.016	rich	-	supported	V002	z3_nia	benchmark/Audit/SP1/V002_sponge_state_not_zero.cz	The sponge state is not initialized to zero
+veridise	V-SP1-VUL-007	X	✗	-	-	-	unsupported	-	-	-	The gnark Poseidon hash is not reduced modulo the field

@@ -39,7 +39,7 @@ ensure_binary
 MANIFEST="$MANIFEST_DIR/exp2_audits.tsv"
 OUT_TSV="$RESULTS_DIR/exp2_audits.tsv"
 
-printf "source\tid\tcat\tpaper_result\tpaper_time_s\tstatus\tcli_observation\treproduced\tcurrent_time_s\tcase_key\tfinding\n" >"$OUT_TSV"
+printf "source\tid\tcat\tpaper_result\tpaper_time_s\tpaper_variant\textra_args\tstatus\tcli_observation\treproduced\tcurrent_time_s\ttime_delta_s\ttime_match\tcase_key\tfinding\n" >"$OUT_TSV"
 
 supported_count=0
 reproduced_count=0
@@ -48,14 +48,14 @@ local_reproduced=0
 cross_reproduced=0
 semantic_gap_count=0
 
-while IFS=$'\t' read -r source id category paper_result paper_time_s local_status case_key solver rel_path finding; do
+while IFS=$'\t' read -r source id category paper_result paper_time_s paper_variant extra_args local_status case_key solver rel_path finding; do
   if [[ "$source" == "source" ]]; then
     continue
   fi
 
   if [[ "$local_status" == "supported" ]]; then
     supported_count=$((supported_count + 1))
-    IFS=$'\t' read -r cli_status reason avg_s < <(run_case_average "$rel_path" "$solver" "$ITERATIONS")
+    IFS=$'\t' read -r cli_status reason avg_s < <(run_case_average "$rel_path" "$solver" "$ITERATIONS" "$extra_args")
 
     if [[ "$cli_status" == "FAIL" ]]; then
       reproduced="✓"
@@ -72,6 +72,8 @@ while IFS=$'\t' read -r source id category paper_result paper_time_s local_statu
     cli_observation="$cli_status ($reason)"
     status="supported"
     current_time_s="$avg_s"
+    delta_s=$(time_delta_s "$current_time_s" "$paper_time_s")
+    time_match=$(time_match_3dp "$current_time_s" "$paper_time_s")
   else
     unsupported_count=$((unsupported_count + 1))
     if [[ "$category" == "S" ]]; then
@@ -81,11 +83,13 @@ while IFS=$'\t' read -r source id category paper_result paper_time_s local_statu
     cli_observation="SKIP (not modeled)"
     reproduced="✗"
     current_time_s="-"
+    delta_s="-"
+    time_match="-"
   fi
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-    "$source" "$id" "$category" "$paper_result" "$paper_time_s" "$status" \
-    "$cli_observation" "$reproduced" "$current_time_s" "$case_key" "$finding" >>"$OUT_TSV"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "$source" "$id" "$category" "$paper_result" "$paper_time_s" "$paper_variant" "$extra_args" "$status" \
+    "$cli_observation" "$reproduced" "$current_time_s" "$delta_s" "$time_match" "$case_key" "$finding" >>"$OUT_TSV"
 done <"$MANIFEST"
 
 echo "Experiment 2: Table 2 audit-driven benchmarks"
