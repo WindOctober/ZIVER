@@ -1,0 +1,35 @@
+// A12: reduced abstraction of "result not forced < modulus".
+// This keeps the same logical shape as the uint256 issue without a full 256-bit model.
+
+const u32 REDUCED_MODULUS = 40000;
+
+Struct ReducedModulusRangeA12 {
+    input a: u8,
+    input b: u8,
+    output carry: field,
+    output result: u32,
+}
+
+Component ReducedModulusRangeA12 {
+    Computation populate(self) {
+        u32 raw = to_u32(self.a) * to_u32(self.b);
+        if (raw < REDUCED_MODULUS) {
+            self.carry = 0;
+            self.result = raw;
+        } else {
+            self.carry = 1;
+            self.result = raw - REDUCED_MODULUS;
+        }
+    }
+
+    Constraint eval(cols: ReducedModulusRangeA12) {
+        assert_bool(cols.carry);
+
+        u32 raw = to_u32(cols.a) * to_u32(cols.b);
+        assert_eq(raw, cols.result + REDUCED_MODULUS * to_u32(cols.carry));
+
+        // Bug: missing `cols.result < REDUCED_MODULUS`.
+    }
+
+    Query(populate, self; eval, cols)
+}

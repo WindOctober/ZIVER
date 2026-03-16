@@ -1,0 +1,38 @@
+// Code4rena H-01: range-checked limbs are not recomposed back to the source value.
+
+const u32 LIMB_BASE = 16777216;
+const u32 HIGH_MAX = 127;
+
+Struct LimbRecompositionH01 {
+    output value: u32,
+    output low: u32,
+    output high: u32,
+}
+
+Component LimbRecompositionH01 {
+    Computation populate(self) {
+        assert_range(self.low, u24);
+        assert_range(self.high, u8);
+        assert_eq(extract_bit_u32(self.high, 7), 0);
+
+        if (self.high == HIGH_MAX) {
+            assert_eq(self.low, 0);
+        }
+
+        self.value = self.high * LIMB_BASE + self.low;
+    }
+
+    Constraint eval(cols: LimbRecompositionH01) {
+        assert_range(cols.low, u24);
+        assert_range(cols.high, u8);
+        assert_eq(extract_bit_u32(cols.high, 7), 0);
+
+        if (cols.high == HIGH_MAX) {
+            assert_eq(cols.low, 0);
+        }
+
+        // Bug: missing `value = high * 2^24 + low`.
+    }
+
+    Query(populate, self; eval, cols)
+}

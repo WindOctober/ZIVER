@@ -1,0 +1,33 @@
+// Kalos #4: LOAD checks memory is read-only, but does not bind the loaded register value.
+
+Struct LoadValueBindingK4 {
+    input is_load: Selector,
+    input memory_prev: field,
+    input memory_cur: field,
+    output a_value: field,
+}
+
+Component LoadValueBindingK4 {
+    Computation populate(self) {
+        assert_bool(self.is_load);
+
+        if (self.is_load == 1) {
+            assert_eq(self.memory_prev, self.memory_cur);
+            self.a_value = self.memory_cur;
+        } else {
+            self.a_value = 0;
+        }
+    }
+
+    Constraint eval(cols: LoadValueBindingK4) {
+        assert_bool(cols.is_load);
+
+        if (cols.is_load == 1) {
+            assert_eq(cols.memory_prev, cols.memory_cur);
+        }
+
+        // Bug: missing `assert_eq(cols.a_value, cols.memory_cur)` on LOAD.
+    }
+
+    Query(populate, self; eval, cols)
+}

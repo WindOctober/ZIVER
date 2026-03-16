@@ -1,0 +1,37 @@
+// A4: when `is_real = 0`, selectors should not trigger any interaction.
+// This version models the observable semantic effect: an unintended lookup on padding.
+
+Struct PaddingLookupA4 {
+    input is_real: Selector,
+    input memory_selector: Selector,
+    input clk: field,
+    input pc: field,
+    output witness: field,
+}
+
+Component PaddingLookupA4 {
+    Computation populate(self) {
+        assert_bool(self.is_real);
+        assert_bool(self.memory_selector);
+        self.witness = self.memory_selector;
+
+        if (self.is_real == 1) {
+            if (self.memory_selector == 1) {
+                lookup(SendInstruction, 0, self.clk, self.pc, self.memory_selector);
+            }
+        }
+    }
+
+    Constraint eval(cols: PaddingLookupA4) {
+        assert_bool(cols.is_real);
+        assert_bool(cols.memory_selector);
+        assert_eq(cols.witness, cols.memory_selector);
+
+        // Bug: selector can still fire a lookup even when is_real = 0.
+        if (cols.memory_selector == 1) {
+            lookup(SendInstruction, 0, cols.clk, cols.pc, cols.memory_selector);
+        }
+    }
+
+    Query(populate, self; eval, cols)
+}

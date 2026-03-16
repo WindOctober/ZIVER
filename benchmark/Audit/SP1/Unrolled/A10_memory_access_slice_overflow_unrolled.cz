@@ -1,0 +1,63 @@
+// Unrolled A10: two consecutive memory-access slices.
+// This is closer to the real helper pattern that iterates over a slice of addresses.
+
+const u32 BABYBEAR_MODULUS = 2013265921;
+const u32 MAX_SAFE_BASE = 2013265901;
+
+Struct MemoryAccessSliceA10Unrolled {
+    input base0: u32,
+    output addr0_0: u32,
+    output addr0_1: u32,
+    output addr0_2: u32,
+    output base1: u32,
+    output addr1_0: u32,
+    output addr1_1: u32,
+    output addr1_2: u32,
+    output slice_ok0: field,
+    output slice_ok1: field,
+}
+
+Component MemoryAccessSliceA10Unrolled {
+    Computation populate(self) {
+        if (self.base0 <= MAX_SAFE_BASE) {
+            self.addr0_0 = self.base0;
+            self.addr0_1 = self.base0 + 4;
+            self.addr0_2 = self.base0 + 8;
+            self.base1 = self.base0 + 12;
+            self.addr1_0 = self.base1;
+            self.addr1_1 = self.base1 + 4;
+            self.addr1_2 = self.base1 + 8;
+            self.slice_ok0 = 1;
+            self.slice_ok1 = 1;
+        } else {
+            self.addr0_0 = 0;
+            self.addr0_1 = 0;
+            self.addr0_2 = 0;
+            self.base1 = 0;
+            self.addr1_0 = 0;
+            self.addr1_1 = 0;
+            self.addr1_2 = 0;
+            self.slice_ok0 = 0;
+            self.slice_ok1 = 0;
+        }
+    }
+
+    Constraint eval(cols: MemoryAccessSliceA10Unrolled) {
+        assert_bool(cols.slice_ok0);
+        assert_bool(cols.slice_ok1);
+
+        assert_eq(cols.addr0_0, cols.base0);
+        assert_eq(cols.addr0_1, cols.base0 + 4);
+        assert_eq(cols.addr0_2, cols.base0 + 8);
+        assert_eq(cols.base1, cols.base0 + 12);
+        assert_eq(cols.addr1_0, cols.base1);
+        assert_eq(cols.addr1_1, cols.base1 + 4);
+        assert_eq(cols.addr1_2, cols.base1 + 8);
+        assert_eq(cols.slice_ok0, 1);
+        assert_eq(cols.slice_ok1, 1);
+
+        // Bug: missing the upper-bound guard `base0 <= P - 20` for the two-slice walk.
+    }
+
+    Query(populate, self; eval, cols)
+}

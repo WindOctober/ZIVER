@@ -1,0 +1,38 @@
+// Cantina 3.1.2: syscall arguments are reduced modulo BabyBear without
+// first proving they are in-range.
+
+const u32 BABYBEAR_MODULUS = 2013265921;
+
+Struct SyscallArgOverflowC312 {
+    input arg: u32,
+    output accepted: field,
+    output reduced: u32,
+}
+
+Component SyscallArgOverflowC312 {
+    Computation populate(self) {
+        if (self.arg < BABYBEAR_MODULUS) {
+            self.accepted = 1;
+            self.reduced = self.arg;
+        } else {
+            self.accepted = 0;
+            self.reduced = 0;
+        }
+    }
+
+    Constraint eval(cols: SyscallArgOverflowC312) {
+        assert_bool(cols.accepted);
+
+        if (cols.arg < BABYBEAR_MODULUS) {
+            assert_eq(cols.accepted, 1);
+            assert_eq(cols.reduced, cols.arg);
+        } else {
+            assert_eq(cols.accepted, 1);
+            assert_eq(cols.reduced, cols.arg - BABYBEAR_MODULUS);
+        }
+
+        // Bug: missing a range check that rejects `arg >= BABYBEAR_MODULUS`.
+    }
+
+    Query(populate, self; eval, cols)
+}

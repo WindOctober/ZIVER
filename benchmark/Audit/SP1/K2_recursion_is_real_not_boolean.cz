@@ -1,0 +1,21 @@
+// Kalos #2: recursion eval_memory_access omits the boolean constraint on `is_real`.
+
+Struct RecursionIsRealBooleanK2 {
+    output is_real: field,
+    output routed_mult: field,
+}
+
+Component RecursionIsRealBooleanK2 {
+    Computation populate(self) {
+        assert_bool(self.is_real);
+        self.routed_mult = self.is_real;
+    }
+
+    Constraint eval(cols: RecursionIsRealBooleanK2) {
+        assert_eq(cols.routed_mult, cols.is_real);
+
+        // Bug: missing `assert_bool(cols.is_real)`.
+    }
+
+    Query(populate, self; eval, cols)
+}

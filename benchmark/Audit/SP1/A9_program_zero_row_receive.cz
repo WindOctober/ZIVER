@@ -1,0 +1,46 @@
+// A9: ProgramChip can receive an all-zero padded row.
+// This is modeled as a trace-equivalence issue: the correct semantics emit no
+// receive on a zero row, while the buggy constraint side may still emit one.
+
+Struct ProgramZeroReceiveA9 {
+    input pc: u32,
+    input opcode: u32,
+    input op_a_0: Selector,
+    output receive_mult: field,
+}
+
+Component ProgramZeroReceiveA9 {
+    Computation populate(self) {
+        assert_bool(self.op_a_0);
+
+        if (self.pc == 0) {
+            if (self.opcode == 0) {
+                if (self.op_a_0 == 0) {
+                    self.receive_mult = 0;
+                } else {
+                    self.receive_mult = 1;
+                }
+            } else {
+                self.receive_mult = 1;
+            }
+        } else {
+            self.receive_mult = 1;
+        }
+
+        if (self.receive_mult == 1) {
+            lookup(ReceiveInstruction, 0, self.pc, self.opcode, self.op_a_0);
+        }
+    }
+
+    Constraint eval(cols: ProgramZeroReceiveA9) {
+        assert_bool(cols.op_a_0);
+        assert_bool(cols.receive_mult);
+
+        // Bug: zero-row padding is not forced to have multiplicity 0.
+        if (cols.receive_mult == 1) {
+            lookup(ReceiveInstruction, 0, cols.pc, cols.opcode, cols.op_a_0);
+        }
+    }
+
+    Query(populate, self; eval, cols)
+}

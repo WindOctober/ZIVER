@@ -1,0 +1,33 @@
+// RKM0959 #11: exp_reverse_bits uses `when_not(is_last)` instead of `when_not(is_first)`.
+// We model the row-local semantic difference directly.
+
+Struct ExpReverseBitsBoundaryRkm11 {
+    input is_real: Selector,
+    input is_first: Selector,
+    input is_last: Selector,
+    input prev_accum_squared_times_multiplier: field,
+    output should_bind: field,
+    output accum: field,
+}
+
+Component ExpReverseBitsBoundaryRkm11 {
+    Computation populate(self) {
+        assert_bool(self.is_real);
+        assert_bool(self.is_first);
+        assert_bool(self.is_last);
+        self.should_bind = self.is_real * (1 - self.is_first);
+        self.accum = self.should_bind * self.prev_accum_squared_times_multiplier;
+    }
+
+    Constraint eval(cols: ExpReverseBitsBoundaryRkm11) {
+        assert_bool(cols.is_real);
+        assert_bool(cols.is_first);
+        assert_bool(cols.is_last);
+        assert_eq(cols.should_bind, cols.is_real * (1 - cols.is_last));
+        assert_eq(cols.accum, cols.should_bind * cols.prev_accum_squared_times_multiplier);
+
+        // Bug: this should gate on `is_first`, not `is_last`.
+    }
+
+    Query(populate, self; eval, cols)
+}

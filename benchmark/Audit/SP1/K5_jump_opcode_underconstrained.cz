@@ -1,0 +1,30 @@
+// Kalos #5: jump opcodes leave `a` underconstrained, and JALR constrains `next_fp`
+// against `a` instead of `c`. We model the JALR branch directly.
+
+Struct JumpOpcodeBindingK5 {
+    input pc: u32,
+    input b_value: u32,
+    input c_value: u32,
+    output a_value: u32,
+    output next_fp: u32,
+    output next_pc: u32,
+}
+
+Component JumpOpcodeBindingK5 {
+    Computation populate(self) {
+        self.a_value = self.pc + 1;
+        self.next_fp = self.c_value;
+        self.next_pc = self.b_value;
+    }
+
+    Constraint eval(cols: JumpOpcodeBindingK5) {
+        assert_eq(cols.next_fp, cols.a_value);
+        assert_eq(cols.next_pc, cols.b_value);
+
+        // Bug:
+        // - missing binding from `a_value` to the saved `pc + 1`
+        // - JALR should constrain `next_fp = c_value`, not `a_value`
+    }
+
+    Query(populate, self; eval, cols)
+}

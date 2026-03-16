@@ -1,0 +1,58 @@
+// Richer A11: expose the alignment bits and the derived access-enable column.
+
+Struct UnalignedMemoryAccessA11Rich {
+    input clk: field,
+    input addr: u32,
+    input value: field,
+    input is_read: Selector,
+    input is_write: Selector,
+    output bit0: field,
+    output bit1: field,
+    output aligned: field,
+    output do_access: field,
+}
+
+Component UnalignedMemoryAccessA11Rich {
+    Computation populate(self) {
+        field op_selected = self.is_read + self.is_write;
+
+        assert_bool(self.is_read);
+        assert_bool(self.is_write);
+        assert_zero(self.is_read * self.is_write);
+        assert_bool(op_selected);
+
+        self.bit0 = extract_bit_u32(self.addr, 0);
+        self.bit1 = extract_bit_u32(self.addr, 1);
+        self.aligned = (1 - self.bit0) * (1 - self.bit1);
+        self.do_access = self.aligned * op_selected;
+
+        if (self.do_access == 1) {
+            lookup(Send, 0, self.clk, self.addr, self.value);
+        }
+    }
+
+    Constraint eval(cols: UnalignedMemoryAccessA11Rich) {
+        field op_selected = cols.is_read + cols.is_write;
+
+        assert_bool(cols.is_read);
+        assert_bool(cols.is_write);
+        assert_zero(cols.is_read * cols.is_write);
+        assert_bool(op_selected);
+
+        assert_eq(cols.bit0, extract_bit_u32(cols.addr, 0));
+        assert_eq(cols.bit1, extract_bit_u32(cols.addr, 1));
+        assert_bool(cols.bit0);
+        assert_bool(cols.bit1);
+        assert_eq(cols.aligned, (1 - cols.bit0) * (1 - cols.bit1));
+        assert_bool(cols.aligned);
+        assert_eq(cols.do_access, op_selected);
+
+        if (cols.do_access == 1) {
+            lookup(Send, 0, cols.clk, cols.addr, cols.value);
+        }
+
+        // Bug: the access-enable column is not gated by `aligned`.
+    }
+
+    Query(populate, self; eval, cols)
+}

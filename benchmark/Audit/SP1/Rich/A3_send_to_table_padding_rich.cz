@@ -1,0 +1,65 @@
+// Richer A3: carry more of the ECALL local checks, but still leave the padding
+// gate on `send_to_table` missing on the constraint side.
+
+Struct EcallSendToTableA3Rich {
+    input is_real: Selector,
+    input is_halt: Selector,
+    input is_commit_deferred: Selector,
+    input raw_send_to_table: Selector,
+    input op_b_top: u8,
+    input op_c_top: u8,
+    output send_to_table: field,
+    output do_halt_range_check: field,
+    output do_commit_range_check: field,
+}
+
+Component EcallSendToTableA3Rich {
+    Computation populate(self) {
+        assert_bool(self.is_real);
+        assert_bool(self.is_halt);
+        assert_bool(self.is_commit_deferred);
+        assert_bool(self.raw_send_to_table);
+
+        self.send_to_table = self.is_real * self.raw_send_to_table;
+        self.do_halt_range_check = self.is_real * self.is_halt;
+        self.do_commit_range_check = self.is_real * self.is_commit_deferred;
+
+        if (self.is_real == 0) {
+            assert_eq(self.is_halt, 0);
+            assert_eq(self.is_commit_deferred, 0);
+        }
+
+        if (self.raw_send_to_table == 1) {
+            assert_eq(self.op_b_top, 0);
+            assert_eq(self.op_c_top, 0);
+        }
+    }
+
+    Constraint eval(cols: EcallSendToTableA3Rich) {
+        assert_bool(cols.is_real);
+        assert_bool(cols.is_halt);
+        assert_bool(cols.is_commit_deferred);
+        assert_bool(cols.raw_send_to_table);
+        assert_bool(cols.send_to_table);
+        assert_bool(cols.do_halt_range_check);
+        assert_bool(cols.do_commit_range_check);
+
+        assert_eq(cols.send_to_table, cols.raw_send_to_table);
+        assert_eq(cols.do_halt_range_check, cols.is_real * cols.is_halt);
+        assert_eq(cols.do_commit_range_check, cols.is_real * cols.is_commit_deferred);
+
+        if (cols.is_real == 0) {
+            assert_eq(cols.is_halt, 0);
+            assert_eq(cols.is_commit_deferred, 0);
+        }
+
+        if (cols.send_to_table == 1) {
+            assert_eq(cols.op_b_top, 0);
+            assert_eq(cols.op_c_top, 0);
+        }
+
+        // Bug: missing `when_not(is_real).assert_zero(send_to_table)`.
+    }
+
+    Query(populate, self; eval, cols)
+}

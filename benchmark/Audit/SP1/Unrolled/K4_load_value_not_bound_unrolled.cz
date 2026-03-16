@@ -1,0 +1,89 @@
+// Unrolled K4: two consecutive LOAD rows with address decode, memory-read activation,
+// and register-A writeback.
+
+Struct LoadValueBindingK4Unrolled {
+    input is_real0: Selector,
+    input is_load0: Selector,
+    input base0: u32,
+    input offset0: u32,
+    input memory_prev0: field,
+    input memory_cur0: field,
+    input is_real1: Selector,
+    input is_load1: Selector,
+    input base1: u32,
+    input offset1: u32,
+    input memory_prev1: field,
+    input memory_cur1: field,
+    input pc0: u32,
+    output addr0: u32,
+    output mem_read_mult0: field,
+    output a0: field,
+    output next_pc0: u32,
+    output pc1: u32,
+    output addr1: u32,
+    output mem_read_mult1: field,
+    output a1: field,
+    output next_pc1: u32,
+}
+
+Component LoadValueBindingK4Unrolled {
+    Computation populate(self) {
+        assert_bool(self.is_real0);
+        assert_bool(self.is_load0);
+        assert_bool(self.is_real1);
+        assert_bool(self.is_load1);
+
+        self.addr0 = self.base0 + self.offset0;
+        self.mem_read_mult0 = self.is_real0 * self.is_load0;
+        self.next_pc0 = self.is_real0 * (self.pc0 + 4);
+
+        if (self.mem_read_mult0 == 1) {
+            assert_eq(self.memory_prev0, self.memory_cur0);
+            self.a0 = self.memory_cur0;
+        } else {
+            self.a0 = 0;
+        }
+
+        self.pc1 = self.next_pc0;
+        self.addr1 = self.base1 + self.offset1;
+        self.mem_read_mult1 = self.is_real1 * self.is_load1;
+        self.next_pc1 = self.is_real1 * (self.pc1 + 4);
+
+        if (self.mem_read_mult1 == 1) {
+            assert_eq(self.memory_prev1, self.memory_cur1);
+            self.a1 = self.memory_cur1;
+        } else {
+            self.a1 = self.a0;
+        }
+    }
+
+    Constraint eval(cols: LoadValueBindingK4Unrolled) {
+        assert_bool(cols.is_real0);
+        assert_bool(cols.is_load0);
+        assert_bool(cols.is_real1);
+        assert_bool(cols.is_load1);
+
+        assert_eq(cols.addr0, cols.base0 + cols.offset0);
+        assert_eq(cols.mem_read_mult0, cols.is_real0 * cols.is_load0);
+        assert_eq(cols.next_pc0, cols.is_real0 * (cols.pc0 + 4));
+
+        if (cols.mem_read_mult0 == 1) {
+            assert_eq(cols.memory_prev0, cols.memory_cur0);
+        }
+
+        assert_eq(cols.pc1, cols.next_pc0);
+        assert_eq(cols.addr1, cols.base1 + cols.offset1);
+        assert_eq(cols.mem_read_mult1, cols.is_real1 * cols.is_load1);
+        assert_eq(cols.next_pc1, cols.is_real1 * (cols.pc1 + 4));
+
+        if (cols.mem_read_mult1 == 1) {
+            assert_eq(cols.memory_prev1, cols.memory_cur1);
+        } else {
+            assert_eq(cols.a1, cols.a0);
+        }
+
+        // Bug: both LOAD-local writeback steps omit `a = memory_cur`.
+    }
+
+    Query(populate, self; eval, cols)
+}

@@ -1,0 +1,83 @@
+// Unrolled A2: two consecutive ECALL-local transitions.
+// This follows the local ECALL chip shape more closely:
+// state -> next_pc/next_clk/exit_code -> next state -> next_pc/next_clk/exit_code.
+
+const u32 HALT_PC = 1;
+const u32 ECALL_CLK_INC = 264;
+
+Struct EcallNextPcA2Unrolled {
+    input is_real0: Selector,
+    input is_halt0: Selector,
+    input op_a_0_0: Selector,
+    input arg1_0: u32,
+    input is_real1: Selector,
+    input is_halt1: Selector,
+    input op_a_0_1: Selector,
+    input arg1_1: u32,
+    input pc0: u32,
+    input clk0: u32,
+    output next_pc0: u32,
+    output next_clk0: u32,
+    output exit_code0: u32,
+    output pc1: u32,
+    output clk1: u32,
+    output next_pc1: u32,
+    output next_clk1: u32,
+    output exit_code1: u32,
+}
+
+Component EcallNextPcA2Unrolled {
+    Computation populate(self) {
+        assert_bool(self.is_real0);
+        assert_bool(self.is_halt0);
+        assert_bool(self.op_a_0_0);
+        assert_bool(self.is_real1);
+        assert_bool(self.is_halt1);
+        assert_bool(self.op_a_0_1);
+
+        assert_zero(self.is_real0 * self.op_a_0_0);
+        assert_zero(self.is_real1 * self.op_a_0_1);
+
+        self.next_clk0 = self.is_real0 * (self.clk0 + ECALL_CLK_INC);
+        self.next_pc0 =
+            self.is_real0 * self.is_halt0 * HALT_PC
+            + self.is_real0 * (1 - self.is_halt0) * (self.pc0 + 4);
+        self.exit_code0 = self.is_real0 * self.is_halt0 * self.arg1_0;
+
+        self.pc1 = self.next_pc0;
+        self.clk1 = self.next_clk0;
+
+        self.next_clk1 = self.is_real1 * (self.clk1 + ECALL_CLK_INC);
+        self.next_pc1 =
+            self.is_real1 * self.is_halt1 * HALT_PC
+            + self.is_real1 * (1 - self.is_halt1) * (self.pc1 + 4);
+        self.exit_code1 = self.is_real1 * self.is_halt1 * self.arg1_1;
+    }
+
+    Constraint eval(cols: EcallNextPcA2Unrolled) {
+        assert_bool(cols.is_real0);
+        assert_bool(cols.is_halt0);
+        assert_bool(cols.op_a_0_0);
+        assert_bool(cols.is_real1);
+        assert_bool(cols.is_halt1);
+        assert_bool(cols.op_a_0_1);
+
+        assert_zero(cols.is_real0 * cols.op_a_0_0);
+        assert_zero(cols.is_real1 * cols.op_a_0_1);
+
+        assert_eq(cols.next_clk0, cols.is_real0 * (cols.clk0 + ECALL_CLK_INC));
+        assert_zero(cols.is_real0 * cols.is_halt0 * (cols.next_pc0 - HALT_PC));
+        assert_eq(cols.exit_code0, cols.is_real0 * cols.is_halt0 * cols.arg1_0);
+
+        assert_eq(cols.pc1, cols.next_pc0);
+        assert_eq(cols.clk1, cols.next_clk0);
+
+        assert_eq(cols.next_clk1, cols.is_real1 * (cols.clk1 + ECALL_CLK_INC));
+        assert_zero(cols.is_real1 * cols.is_halt1 * (cols.next_pc1 - HALT_PC));
+        assert_eq(cols.exit_code1, cols.is_real1 * cols.is_halt1 * cols.arg1_1);
+
+        // Bug: both ECALL-local transitions are missing the non-HALT `next_pc = pc + 4` check.
+    }
+
+    Query(populate, self; eval, cols)
+}

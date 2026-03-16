@@ -1,0 +1,116 @@
+// Unrolled A5: two consecutive CPU rows writing or preserving register A.
+// This mirrors the local "prev a -> current a -> next row prev a" flow.
+
+Struct ReadOnlySelectorA5Unrolled {
+    input is_beq0: Selector,
+    input is_bne0: Selector,
+    input is_store0: Selector,
+    input is_syscall0: Selector,
+    input is_halt0: Selector,
+    input is_load0: Selector,
+    input write_value0: u32,
+    input is_beq1: Selector,
+    input is_bne1: Selector,
+    input is_store1: Selector,
+    input is_syscall1: Selector,
+    input is_halt1: Selector,
+    input is_load1: Selector,
+    input write_value1: u32,
+    input prev_a0: u32,
+    output readonly0: field,
+    output a0: u32,
+    output prev_a1: u32,
+    output readonly1: field,
+    output a1: u32,
+}
+
+Component ReadOnlySelectorA5Unrolled {
+    Computation populate(self) {
+        field opcode_class0 =
+            self.is_beq0
+            + self.is_bne0
+            + self.is_store0
+            + self.is_syscall0
+            + self.is_halt0
+            + self.is_load0;
+        field opcode_class1 =
+            self.is_beq1
+            + self.is_bne1
+            + self.is_store1
+            + self.is_syscall1
+            + self.is_halt1
+            + self.is_load1;
+
+        assert_bool(self.is_beq0);
+        assert_bool(self.is_bne0);
+        assert_bool(self.is_store0);
+        assert_bool(self.is_syscall0);
+        assert_bool(self.is_halt0);
+        assert_bool(self.is_load0);
+        assert_bool(opcode_class0);
+
+        assert_bool(self.is_beq1);
+        assert_bool(self.is_bne1);
+        assert_bool(self.is_store1);
+        assert_bool(self.is_syscall1);
+        assert_bool(self.is_halt1);
+        assert_bool(self.is_load1);
+        assert_bool(opcode_class1);
+
+        self.readonly0 =
+            self.is_beq0 + self.is_bne0 + self.is_store0 + self.is_syscall0 + self.is_halt0;
+        self.a0 = self.readonly0 * self.prev_a0 + self.is_load0 * self.write_value0;
+
+        self.prev_a1 = self.a0;
+        self.readonly1 =
+            self.is_beq1 + self.is_bne1 + self.is_store1 + self.is_syscall1 + self.is_halt1;
+        self.a1 = self.readonly1 * self.prev_a1 + self.is_load1 * self.write_value1;
+    }
+
+    Constraint eval(cols: ReadOnlySelectorA5Unrolled) {
+        field opcode_class0 =
+            cols.is_beq0
+            + cols.is_bne0
+            + cols.is_store0
+            + cols.is_syscall0
+            + cols.is_halt0
+            + cols.is_load0;
+        field opcode_class1 =
+            cols.is_beq1
+            + cols.is_bne1
+            + cols.is_store1
+            + cols.is_syscall1
+            + cols.is_halt1
+            + cols.is_load1;
+        field readonly_buggy0 = cols.is_beq0 + cols.is_bne0 + cols.is_store0;
+        field readonly_buggy1 = cols.is_beq1 + cols.is_bne1 + cols.is_store1;
+
+        assert_bool(cols.is_beq0);
+        assert_bool(cols.is_bne0);
+        assert_bool(cols.is_store0);
+        assert_bool(cols.is_syscall0);
+        assert_bool(cols.is_halt0);
+        assert_bool(cols.is_load0);
+        assert_bool(opcode_class0);
+
+        assert_bool(cols.is_beq1);
+        assert_bool(cols.is_bne1);
+        assert_bool(cols.is_store1);
+        assert_bool(cols.is_syscall1);
+        assert_bool(cols.is_halt1);
+        assert_bool(cols.is_load1);
+        assert_bool(opcode_class1);
+
+        assert_eq(cols.readonly0, readonly_buggy0);
+        assert_eq(cols.a0, readonly_buggy0 * cols.prev_a0 + cols.is_load0 * cols.write_value0);
+
+        assert_eq(cols.prev_a1, cols.a0);
+        assert_eq(cols.readonly1, readonly_buggy1);
+        assert_eq(cols.a1, readonly_buggy1 * cols.prev_a1 + cols.is_load1 * cols.write_value1);
+
+        // Bug: syscall and halt rows should preserve operand A across both local steps,
+        // but they are omitted from the read-only selector.
+    }
+
+    Query(populate, self; eval, cols)
+}

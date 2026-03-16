@@ -1,0 +1,41 @@
+// Richer A10: keep a three-word slice instead of a single derived address.
+
+const u32 BABYBEAR_MODULUS = 2013265921;
+const u32 MAX_SAFE_BASE = 2013265913;
+
+Struct MemoryAccessSliceA10Rich {
+    input base: u32,
+    input clk: u32,
+    output first_addr: u32,
+    output second_addr: u32,
+    output third_addr: u32,
+    output slice_ok: field,
+}
+
+Component MemoryAccessSliceA10Rich {
+    Computation populate(self) {
+        self.first_addr = self.base;
+
+        if (self.base <= MAX_SAFE_BASE) {
+            self.second_addr = self.base + 4;
+            self.third_addr = self.base + 8;
+            self.slice_ok = 1;
+        } else {
+            self.second_addr = 0;
+            self.third_addr = 0;
+            self.slice_ok = 0;
+        }
+    }
+
+    Constraint eval(cols: MemoryAccessSliceA10Rich) {
+        assert_bool(cols.slice_ok);
+        assert_eq(cols.first_addr, cols.base);
+        assert_eq(cols.second_addr, cols.base + 4);
+        assert_eq(cols.third_addr, cols.base + 8);
+        assert_eq(cols.slice_ok, 1);
+
+        // Bug: missing `base <= P - 8`.
+    }
+
+    Query(populate, self; eval, cols)
+}

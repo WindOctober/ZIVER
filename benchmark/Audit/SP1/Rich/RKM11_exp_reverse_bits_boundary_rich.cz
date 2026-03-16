@@ -1,0 +1,45 @@
+// Richer RKM11: keep the accumulator update and the boundary selector.
+
+Struct ExpReverseBitsBoundaryRkm11Rich {
+    input is_real: Selector,
+    input is_first: Selector,
+    input is_last: Selector,
+    input prev_accum_squared_times_multiplier: field,
+    input current_bit: Selector,
+    input multiplier: field,
+    output should_bind: field,
+    output accum: field,
+    output next_accum: field,
+}
+
+Component ExpReverseBitsBoundaryRkm11Rich {
+    Computation populate(self) {
+        assert_bool(self.is_real);
+        assert_bool(self.is_first);
+        assert_bool(self.is_last);
+        assert_bool(self.current_bit);
+
+        self.should_bind = self.is_real * (1 - self.is_first);
+        self.accum =
+            self.should_bind * self.prev_accum_squared_times_multiplier + (1 - self.should_bind);
+        self.next_accum = self.accum + self.current_bit * self.multiplier;
+    }
+
+    Constraint eval(cols: ExpReverseBitsBoundaryRkm11Rich) {
+        assert_bool(cols.is_real);
+        assert_bool(cols.is_first);
+        assert_bool(cols.is_last);
+        assert_bool(cols.current_bit);
+
+        assert_eq(cols.should_bind, cols.is_real * (1 - cols.is_last));
+        assert_eq(
+            cols.accum,
+            cols.should_bind * cols.prev_accum_squared_times_multiplier + (1 - cols.should_bind),
+        );
+        assert_eq(cols.next_accum, cols.accum + cols.current_bit * cols.multiplier);
+
+        // Bug: this should gate on `is_first`, not `is_last`.
+    }
+
+    Query(populate, self; eval, cols)
+}

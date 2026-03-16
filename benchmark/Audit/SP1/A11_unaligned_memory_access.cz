@@ -1,0 +1,38 @@
+// A11: unaligned memory accesses should not emit memory interactions.
+// We model this as a trace-equivalence issue.
+
+Struct UnalignedMemoryAccessA11 {
+    input clk: field,
+    input addr: u32,
+    input value: field,
+    output do_access: field,
+}
+
+Component UnalignedMemoryAccessA11 {
+    Computation populate(self) {
+        field bit0 = extract_bit_u32(self.addr, 0);
+        field bit1 = extract_bit_u32(self.addr, 1);
+
+        if (bit0 == 0) {
+            if (bit1 == 0) {
+                self.do_access = 1;
+                lookup(Send, 0, self.clk, self.addr, self.value);
+            } else {
+                self.do_access = 0;
+            }
+        } else {
+            self.do_access = 0;
+        }
+    }
+
+    Constraint eval(cols: UnalignedMemoryAccessA11) {
+        assert_bool(cols.do_access);
+
+        // Bug: the access can still be emitted without tying it to addr % 4 == 0.
+        if (cols.do_access == 1) {
+            lookup(Send, 0, cols.clk, cols.addr, cols.value);
+        }
+    }
+
+    Query(populate, self; eval, cols)
+}

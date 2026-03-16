@@ -1,0 +1,31 @@
+// A3: `send_to_table` may be nonzero on padding rows.
+
+Struct EcallSendToTableA3 {
+    input is_real: Selector,
+    input is_ecall: Selector,
+    output send_to_table: field,
+}
+
+Component EcallSendToTableA3 {
+    Computation populate(self) {
+        assert_bool(self.is_real);
+        assert_bool(self.is_ecall);
+        self.send_to_table = self.is_real * self.is_ecall;
+    }
+
+    Constraint eval(cols: EcallSendToTableA3) {
+        assert_bool(cols.is_real);
+        assert_bool(cols.is_ecall);
+        assert_bool(cols.send_to_table);
+
+        // Real ECALL row: multiplicity must be 1.
+        assert_zero(cols.is_real * cols.is_ecall * (cols.send_to_table - 1));
+        // Real non-ECALL row: multiplicity must be 0.
+        assert_zero(cols.is_real * (1 - cols.is_ecall) * cols.send_to_table);
+
+        // Bug: missing padding gate
+        // assert_zero((1 - cols.is_real) * cols.send_to_table);
+    }
+
+    Query(populate, self; eval, cols)
+}

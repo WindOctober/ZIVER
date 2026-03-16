@@ -1,0 +1,29 @@
+// Veridise V-SP1-VUL-002: challenger constructor zeroes counters but not the sponge state.
+
+const usize STATE_WIDTH = 3;
+
+Struct SpongeStateInitV002 {
+    output sponge_state: [field; STATE_WIDTH],
+    output nb_inputs: field,
+    output nb_outputs: field,
+}
+
+Component SpongeStateInitV002 {
+    Computation populate(self) {
+        self.nb_inputs = 0;
+        self.nb_outputs = 0;
+
+        for i in 0..STATE_WIDTH {
+            self.sponge_state[i] = 0;
+        }
+    }
+
+    Constraint eval(cols: SpongeStateInitV002) {
+        assert_eq(cols.nb_inputs, 0);
+        assert_eq(cols.nb_outputs, 0);
+
+        // Bug: missing zero constraints on `sponge_state`.
+    }
+
+    Query(populate, self; eval, cols)
+}

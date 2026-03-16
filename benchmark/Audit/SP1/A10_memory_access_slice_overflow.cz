@@ -1,0 +1,31 @@
+// A10: eval_memory_access_slice address addition can overflow the allowed field range.
+// We model the intended semantics as "reject bases above P-4", while the buggy
+// side still derives a second address with `base + 4`.
+
+const u32 BABYBEAR_MODULUS = 2013265921;
+const u32 MAX_SAFE_BASE = 2013265917;
+
+Struct MemoryAccessSliceA10 {
+    input base: u32,
+    output second_addr: u32,
+}
+
+Component MemoryAccessSliceA10 {
+    Computation populate(self) {
+        if (self.base <= MAX_SAFE_BASE) {
+            self.second_addr = self.base + 4;
+        } else {
+            // Sentinel for "this slice access should be rejected".
+            self.second_addr = 0;
+        }
+    }
+
+    Constraint eval(cols: MemoryAccessSliceA10) {
+        assert_range(cols.base, u32);
+        assert_eq(cols.second_addr, cols.base + 4);
+
+        // Bug: missing `cols.base <= MAX_SAFE_BASE`.
+    }
+
+    Query(populate, self; eval, cols)
+}

@@ -1,0 +1,30 @@
+// A2: `next_pc` underconstrained on ECALL.
+// If the syscall is not HALT, `next_pc` should be `pc + 4`.
+
+Struct EcallNextPcA2 {
+    input is_real: Selector,
+    input is_halt: Selector,
+    input pc: u32,
+    output next_pc: u32,
+}
+
+Component EcallNextPcA2 {
+    Computation populate(self) {
+        assert_bool(self.is_real);
+        assert_bool(self.is_halt);
+        self.next_pc = self.is_real * (1 - self.is_halt) * (self.pc + 4);
+    }
+
+    Constraint eval(cols: EcallNextPcA2) {
+        assert_bool(cols.is_real);
+        assert_bool(cols.is_halt);
+
+        // Existing HALT case.
+        assert_zero(cols.is_real * cols.is_halt * cols.next_pc);
+
+        // Bug: missing
+        // assert_zero(cols.is_real * (1 - cols.is_halt) * (cols.next_pc - cols.pc - 4));
+    }
+
+    Query(populate, self; eval, cols)
+}

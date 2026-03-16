@@ -1,0 +1,59 @@
+// Richer H01: preserve the byte-level checks on the low limb and the boundary case on `high`.
+
+const u32 LIMB_BASE = 16777216;
+const u32 HIGH_MAX = 127;
+
+Struct LimbRecompositionH01Rich {
+    output value: u32,
+    output low: u32,
+    output high: u32,
+    output low_b0: u8,
+    output low_b1: u8,
+    output low_b2: u8,
+    output is_max_high: field,
+}
+
+Component LimbRecompositionH01Rich {
+    Computation populate(self) {
+        assert_range(self.low, u24);
+        assert_range(self.high, u8);
+        assert_eq(extract_bit_u32(self.high, 7), 0);
+
+        self.low_b0 = to_bytes(self.low)[0];
+        self.low_b1 = to_bytes(self.low)[1];
+        self.low_b2 = to_bytes(self.low)[2];
+        self.is_max_high = 0;
+
+        if (self.high == HIGH_MAX) {
+            self.is_max_high = 1;
+            assert_eq(self.low, 0);
+        }
+
+        self.value = self.high * LIMB_BASE + self.low;
+    }
+
+    Constraint eval(cols: LimbRecompositionH01Rich) {
+        assert_range(cols.low, u24);
+        assert_range(cols.high, u8);
+        assert_eq(extract_bit_u32(cols.high, 7), 0);
+        assert_range(cols.low_b0, u8);
+        assert_range(cols.low_b1, u8);
+        assert_range(cols.low_b2, u8);
+        assert_bool(cols.is_max_high);
+
+        assert_eq(cols.low_b0, to_bytes(cols.low)[0]);
+        assert_eq(cols.low_b1, to_bytes(cols.low)[1]);
+        assert_eq(cols.low_b2, to_bytes(cols.low)[2]);
+
+        if (cols.high == HIGH_MAX) {
+            assert_eq(cols.is_max_high, 1);
+            assert_eq(cols.low, 0);
+        } else {
+            assert_eq(cols.is_max_high, 0);
+        }
+
+        // Bug: missing `value = high * 2^24 + low`.
+    }
+
+    Query(populate, self; eval, cols)
+}

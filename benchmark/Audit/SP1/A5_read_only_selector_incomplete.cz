@@ -1,0 +1,57 @@
+// A5: `is_op_a_read_only_instruction` misses some selectors.
+// We model a reduced selector set where syscall / halt should be read-only but are omitted.
+
+Struct ReadOnlySelectorA5 {
+    input is_beq: Selector,
+    input is_bne: Selector,
+    input is_store: Selector,
+    input is_syscall: Selector,
+    input is_halt: Selector,
+    input prev_a: u32,
+    input write_value: u32,
+    output a_value: u32,
+}
+
+Component ReadOnlySelectorA5 {
+    Computation populate(self) {
+        field readonly_full =
+            self.is_beq
+            + self.is_bne
+            + self.is_store
+            + self.is_syscall
+            + self.is_halt;
+
+        assert_bool(self.is_beq);
+        assert_bool(self.is_bne);
+        assert_bool(self.is_store);
+        assert_bool(self.is_syscall);
+        assert_bool(self.is_halt);
+        assert_bool(readonly_full);
+
+        if (readonly_full == 1) {
+            self.a_value = self.prev_a;
+        } else {
+            self.a_value = self.write_value;
+        }
+    }
+
+    Constraint eval(cols: ReadOnlySelectorA5) {
+        field readonly_buggy = cols.is_beq + cols.is_bne + cols.is_store;
+
+        assert_bool(cols.is_beq);
+        assert_bool(cols.is_bne);
+        assert_bool(cols.is_store);
+        assert_bool(cols.is_syscall);
+        assert_bool(cols.is_halt);
+        assert_bool(readonly_buggy);
+
+        if (readonly_buggy == 1) {
+            assert_eq(cols.a_value, cols.prev_a);
+        }
+
+        // Bug: `is_syscall` / `is_halt` are read-only in the executor semantics,
+        // but omitted from the guard above.
+    }
+
+    Query(populate, self; eval, cols)
+}

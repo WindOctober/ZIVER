@@ -1,0 +1,48 @@
+// Richer C312: keep the reduced value's byte decomposition as part of the local state.
+
+const u32 BABYBEAR_MODULUS = 2013265921;
+
+Struct SyscallArgOverflowC312Rich {
+    input arg: u32,
+    input syscall_id: u8,
+    output accepted: field,
+    output reduced: u32,
+    output reduced_lo: u8,
+    output reduced_hi: u8,
+}
+
+Component SyscallArgOverflowC312Rich {
+    Computation populate(self) {
+        if (self.arg < BABYBEAR_MODULUS) {
+            self.accepted = 1;
+            self.reduced = self.arg;
+        } else {
+            self.accepted = 0;
+            self.reduced = 0;
+        }
+
+        self.reduced_lo = to_bytes(self.reduced)[0];
+        self.reduced_hi = to_bytes(self.reduced)[1];
+    }
+
+    Constraint eval(cols: SyscallArgOverflowC312Rich) {
+        assert_bool(cols.accepted);
+        assert_range(cols.reduced_lo, u8);
+        assert_range(cols.reduced_hi, u8);
+
+        assert_eq(cols.reduced_lo, to_bytes(cols.reduced)[0]);
+        assert_eq(cols.reduced_hi, to_bytes(cols.reduced)[1]);
+
+        if (cols.arg < BABYBEAR_MODULUS) {
+            assert_eq(cols.accepted, 1);
+            assert_eq(cols.reduced, cols.arg);
+        } else {
+            assert_eq(cols.accepted, 1);
+            assert_eq(cols.reduced, cols.arg - BABYBEAR_MODULUS);
+        }
+
+        // Bug: missing a range check that rejects `arg >= BABYBEAR_MODULUS`.
+    }
+
+    Query(populate, self; eval, cols)
+}
