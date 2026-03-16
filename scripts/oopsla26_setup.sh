@@ -13,6 +13,8 @@ require_command cvc5
 ensure_binary
 
 ENV_REPORT="$RESULTS_DIR/environment.txt"
+ENV_REPORT_REL=$(repo_relpath "$ENV_REPORT")
+BIN_REL=$(repo_relpath "$BIN")
 
 {
   echo "OOPSLA 2026 Evaluation Environment"
@@ -35,11 +37,11 @@ ENV_REPORT="$RESULTS_DIR/environment.txt"
   echo "  cvc5:  $(cvc5 --version | head -n 1)"
   echo
   echo "Binary:"
-  echo "  path:  $BIN"
+  echo "  path:  $BIN_REL"
   echo "  git:   $(git -C "$ROOT_DIR" rev-parse --short HEAD)"
   echo "  date:  $(date -Iseconds)"
 } >"$ENV_REPORT"
 
 cat "$ENV_REPORT"
 echo
-echo "[ok] environment report written to $ENV_REPORT"
+echo "[ok] environment report written to $ENV_REPORT_REL"

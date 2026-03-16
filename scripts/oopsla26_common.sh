@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN="$ROOT_DIR/target/debug/certzero"
+BIN="$ROOT_DIR/target/debug/ziver"
 MANIFEST_DIR="$ROOT_DIR/evaluation/oopsla26"
 RESULTS_DIR="${RESULTS_DIR:-$ROOT_DIR/results/oopsla26}"
 PAPER_OS="Ubuntu 22.04.5 LTS under WSL2 (kernel 6.6.87.2)"
@@ -15,6 +15,15 @@ PAPER_CVC5="cvc5 1.3.2 (commit 84c7e48)"
 
 ensure_results_dir() {
   mkdir -p "$RESULTS_DIR"
+}
+
+repo_relpath() {
+  local path="$1"
+  if [[ "$path" == "$ROOT_DIR/"* ]]; then
+    printf "%s\n" "${path#"$ROOT_DIR"/}"
+  else
+    printf "%s\n" "$path"
+  fi
 }
 
 require_command() {

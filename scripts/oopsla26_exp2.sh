@@ -38,6 +38,7 @@ ensure_binary
 
 MANIFEST="$MANIFEST_DIR/exp2_audits.tsv"
 OUT_TSV="$RESULTS_DIR/exp2_audits.tsv"
+OUT_TSV_REL=$(repo_relpath "$OUT_TSV")
 
 printf "source\tid\tcat\tpaper_result\tpaper_time_s\tpaper_variant\textra_args\tstatus\tcli_observation\treproduced\tcurrent_time_s\ttime_delta_s\ttime_match\tcase_key\tfinding\n" >"$OUT_TSV"
 
@@ -105,4 +106,4 @@ echo "  reproduced L:    $local_reproduced"
 echo "  reproduced X:    $cross_reproduced"
 echo "  semantic-gap:    $semantic_gap_count"
 echo
-echo "[ok] results written to $OUT_TSV"
+echo "[ok] results written to $OUT_TSV_REL"

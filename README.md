@@ -1,6 +1,6 @@
 # ZIVER OOPSLA 2026 Evaluation Reproduction
 
-This checkout is organized around the `Evaluation` section of `/home/work/paper/OOPSLA2026-ziver/oopsla.pdf`.
+This checkout is organized around the paper's `Evaluation` section.
 
 The paper has two main experiments:
 
@@ -17,7 +17,7 @@ Inside `benchmark/`, only the files needed by `exp1` and `exp2` are retained.
 - `evaluation/oopsla26/exp2_audits.tsv`
   - manifest for `Table 2`, including the paper-facing `rich` / `unrolled` variant chosen for each supported case
 - `scripts/oopsla26_setup.sh`
-  - checks the local environment and builds `target/debug/certzero` if needed
+  - checks the local environment and builds `target/debug/ziver` if needed
 - `scripts/oopsla26_exp1.sh`
   - reproduces `Table 1`
 - `scripts/oopsla26_exp2.sh`
@@ -52,7 +52,6 @@ The reproduction scripts expect these commands to exist in `PATH`:
 The current local checkout already builds with:
 
 ```bash
-cd /home/work/workflow/ziver-workflow/ZIVER
 cargo build --quiet
 ```
 
@@ -61,7 +60,6 @@ cargo build --quiet
 Run the full paper-facing workflow:
 
 ```bash
-cd /home/work/workflow/ziver-workflow/ZIVER
 ./scripts/oopsla26_reproduce_all.sh
 ```
 

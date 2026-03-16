@@ -37,6 +37,7 @@ ensure_binary
 
 MANIFEST="$MANIFEST_DIR/exp1_components.tsv"
 OUT_TSV="$RESULTS_DIR/exp1_components.tsv"
+OUT_TSV_REL=$(repo_relpath "$OUT_TSV")
 
 printf "component\tpattern\tsolver\tpaper_result\tpaper_time_s\tcurrent_cli\tcurrent_time_s\ttime_delta_s\ttime_match\tpaper_match\tcase\n" >"$OUT_TSV"
 
@@ -72,4 +73,4 @@ echo "Average over $ITERATIONS run(s) per case"
 echo
 pretty_print_tsv "$OUT_TSV"
 echo
-echo "[ok] results written to $OUT_TSV"
+echo "[ok] results written to $OUT_TSV_REL"

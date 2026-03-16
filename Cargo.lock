@@ -116,18 +116,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "certzero"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "im",
- "pest",
- "pest_derive",
- "z3",
-]
-
-[[package]]
 name = "cexpr"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -698,4 +686,16 @@ checksum = "1c8b6f6371f887a327524718087bf333e6a45db69f6dfe8319909b9111979128"
 dependencies = [
  "bindgen",
  "pkg-config",
+]
+
+[[package]]
+name = "ziver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "im",
+ "pest",
+ "pest_derive",
+ "z3",
 ]
